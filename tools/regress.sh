@@ -43,7 +43,9 @@ echo "════ 기록 ════"
 has main/port_esp.c "JRN_BREAK" \
   && ok "충전 뒤 다시 뽑아도 일지를 안 지운다 (경계만 남기고 이어 쓴다)" \
   || bad "일지가 뽑을 때 지워진다"
-has main/port_esp.c "잔량이 %d%%→%d%% 로 회복" \
+# 문구가 아니라 **행위**를 본다: 잔량이 오르면 기준을 다시 잡는가
+grep -qE 'pct > s_last_pct' main/port_esp.c \
+  && grep -qE 's_last_pct = pct;[^\n]*' main/port_esp.c \
   && ok "부하로 눌린 잔량을 두 번 세지 않는다" || bad "잔량 이중계상이 돌아왔다"
 
 echo "════ 나가는 길 (그림보다 메모리를 먼저 놓지 않기) ════"

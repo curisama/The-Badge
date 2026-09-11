@@ -2,7 +2,7 @@
 #include "port.h"
 #include "display.h"
 #include "assets/assets.h"
-#include <math.h>
+#include "nightsky.h"
 #include <math.h>
 
 static const char *TAG = "launcher";
@@ -537,24 +537,8 @@ static void build_home(void)
     lv_obj_set_style_bg_color(s_home, lv_color_black(), 0);
     lv_obj_set_style_bg_opa(s_home, LV_OPA_COVER, 0);
 
-    /* The wallpaper is drawn, not stored. A full-screen 466x466 picture costs
-     * 424 KB of flash and this board has 890 KB of headroom left; a gradient
-     * costs nothing and reads the same behind a ring of icons. */
-    lv_obj_t *wall = lv_obj_create(s_home);
-    lv_obj_remove_style_all(wall);
-    lv_obj_remove_flag(wall, LV_OBJ_FLAG_SCROLLABLE);
-    /* 🚨 lv_obj_create() is clickable by default, unlike the image this used to
-     * be. Left that way the wallpaper is the pressed object for every swipe on
-     * the bare background, the screen never sees the gesture, and the page
-     * stops turning. */
-    lv_obj_remove_flag(wall, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_size(wall, 466, 466);
-    lv_obj_center(wall);
-    lv_obj_set_style_radius(wall, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_bg_opa(wall, LV_OPA_COVER, 0);
-    lv_obj_set_style_bg_color(wall, lv_color_hex(0x101822), 0);
-    lv_obj_set_style_bg_grad_color(wall, lv_color_hex(0x000000), 0);
-    lv_obj_set_style_bg_grad_dir(wall, LV_GRAD_DIR_VER, 0);
+    /* The wallpaper is drawn, not stored — see nightsky.h. */
+    nightsky_create(s_home);
 
     /* Apps 120 degrees apart. The icons are the app's own screen shrunk down,
      * which says what it is far faster than a glyph. */

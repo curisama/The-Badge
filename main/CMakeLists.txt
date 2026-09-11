@@ -6,6 +6,7 @@ idf_component_register(
         lcdface.c
         lock.c
         main.c
+        nightsky.c
         port_esp.c
         rec_store.c
         splash.c

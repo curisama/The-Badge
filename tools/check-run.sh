@@ -29,7 +29,7 @@ echo "deaths        ${dead}"
 echo "unexpected reboots ${boot}"
 echo "E errors      ${err}   (${known} explained as harmless, counted apart)"
 if [ "$err" -gt 0 ]; then echo "── unexplained E errors"; grep -E '^E \(' "$RUN" | grep -vE "$KNOWN" | sort -u | head; fi
-grep -E 'checks done' "$RUN" | sed 's/^.*badge: //'
+grep -E 'stress test end' "$RUN" | sed 's/^.*badge: //'
 rm -f "$RUN"
 [ "$draw" -eq 0 ] && [ "$dead" -eq 0 ] && [ "$boot" -eq 0 ] && [ "$err" -eq 0 ] \
   && echo "→ pass" || { echo "→ not a pass"; exit 1; }

@@ -1,11 +1,12 @@
-/* 회의 녹음. 배지가 혼자 녹음한다.
+/* Meeting recording. The badge records on its own.
  *
- * 회사 회의실엔 WiFi 도 없고 폰을 꺼낼 틈도 없다. 그래서 이 앱은 아무데도
- * 안 붙는다 — 마이크를 열어 플래시에 쌓기만 한다. 집에 와서 WiFi 가 잡히면
- * 그때 홈서버로 올라가고, 전사·화자분리·회의록은 거기가 다 한다.
+ * A company meeting room has no WiFi and no moment to pull out a phone. So
+ * this app connects to nothing — it opens the microphone and piles the audio
+ * into flash. Once home and on WiFi it goes up to the home server, and
+ * transcription, speaker separation and minutes all happen there.
  *
- * 녹음은 앱을 나가도, 화면이 꺼져도 계속된다(별도 태스크). 그래야 회의 중에
- * 배지를 주머니에 넣어둘 수 있다. */
+ * Recording carries on with the app closed and the screen off (a separate
+ * task). That is what lets the badge sit in a pocket through a meeting. */
 #include "app.h"
 #include "assets/assets.h"
 #include "port.h"
@@ -22,10 +23,10 @@ static const char *s_why;
 static void paint(void)
 {
     static const uint32_t COL[] = {
-        0x7FB0FF,   /* IDLE  파랑 */
-        0xFF5B5B,   /* REC   빨강 */
-        0x5BD48A,   /* SAVED 초록 */
-        0xFF6B6B,   /* FAIL  빨강 */
+        0x7FB0FF,   /* IDLE  blue */
+        0xFF5B5B,   /* REC   red */
+        0x5BD48A,   /* SAVED green */
+        0xFF6B6B,   /* FAIL  red */
     };
     lv_color_t c = lv_color_hex(COL[s_st]);
 
@@ -67,15 +68,16 @@ static void paint(void)
     lv_obj_set_style_border_color(s_btn, c, 0);
     lv_obj_set_style_arc_color(s_ring, c, LV_PART_INDICATOR);
 
-    /* 녹음 중엔 링이 1분에 한 바퀴. 초침 대신이다. */
+    /* While recording the ring goes round once a minute. It stands in for a second hand. */
     lv_arc_set_value(s_ring, s_st == M_REC ? (secs % 60) * 100 / 60 : 100);
 }
 
 static void go(mstate_t st)
 {
     s_st = st;
-    /* 녹음 중에 화면을 붙잡으면 안 된다. 466x466 AMOLED 를 한 시간 켜두는 건
-     * 마이크보다 훨씬 크다. 녹음은 태스크가 도니 화면과 무관하다. */
+    /* The screen must not be held while recording. An hour of 466x466 AMOLED
+     * costs far more than the microphone. Recording runs in a task, so the
+     * screen has nothing to do with it. */
     launcher_keep_awake(false);
     paint();
 }
@@ -110,26 +112,28 @@ static void long_cb(lv_event_t *e)
 
 static void tick(lv_timer_t *t)
 {
-    /* 🔋 화면이 꺼지면 아무도 안 본다. 다만 🚨 여기서 주기를 바꾸면 안 된다 —
-     * lv_timer_set_period() 는 안쪽에서 lv_timer_handler_resume() 을 불러서,
-     * 타이머 콜백에서 부르면 처리기가 그 자리에서 무한히 다시 돈다.
-     * (0909: 절전하려고 넣었다가 CPU 를 100% 물고 늘어지게 만들었다.
-     *  값이 같아도 마찬가지라 "바뀔 때만 세우기"로도 못 막는다.)
-     * 주기는 그대로 두고 6번에 한 번만 일한다. 효과는 같고 안전하다. */
+    /* 🔋 Screen off, nobody is looking. But 🚨 the period must not be changed
+     * here — lv_timer_set_period() calls lv_timer_handler_resume() internally,
+     * so calling it from a timer callback sends the handler round again on the
+     * spot, forever.
+     * (09-09: added to save power, and it pinned the CPU at 100%. Setting the
+     *  same value does it too, so "only set it when it changes" does not help.)
+     * The period stays as it is and the work happens on one tick in six. Same
+     * effect, and safe. */
     if (launcher_screen_is_off()) {
         static uint8_t skip;
         if (++skip % 6) return;
     }
 
-    /* 녹음이 스스로 멈췄으면(자리 참) 화면도 따라간다 */
+    /* If the recording stopped by itself (out of room) the screen follows */
     if (s_st == M_REC && !port_rec_active()) { go(M_SAVED); return; }
-    /* 대기 중엔 바뀌는 게 없다. 예전엔 초당 2번 화면 86%를 헛되이
-     * 무효화했다 — 녹음 중일 때만 그린다(경과 시간이 흐르니까). */
+    /* Idle, nothing changes. It used to invalidate 86% of the screen twice a
+     * second for nothing — it draws only while recording (the elapsed time moves). */
     if (s_st == M_REC) paint();
 }
 
-/* 🚨 내보내기는 **녹음이 멈춰 있을 때만** 연다. 녹음 중에 USB 모드로
- * 넘어가면 "끝" 이 재부팅이라 담고 있던 것이 잘린다. */
+/* 🚨 Export opens **only while stopped**. Slipping into USB mode mid-recording
+ * makes the reboot the "end" and cuts off what was being held. */
 static void usb_cb(lv_event_t *e)
 {
     (void)e;
@@ -154,7 +158,7 @@ static void meet_enter(lv_obj_t *root)
     lv_obj_set_style_arc_width(s_ring, 10, LV_PART_INDICATOR);
     lv_obj_set_style_arc_color(s_ring, lv_color_hex(0x1E2634), LV_PART_MAIN);
 
-    /* 가운데 큰 버튼. 원형 화면에선 이게 제일 누르기 편하다. */
+    /* The big button in the middle. On a round screen this is the easiest thing to press. */
     s_btn = lv_obj_create(root);
     lv_obj_set_size(s_btn, 300, 300);
     lv_obj_center(s_btn);
@@ -179,8 +183,9 @@ static void meet_enter(lv_obj_t *root)
     lv_obj_set_style_text_color(s_hint, lv_color_hex(0x5A6478), 0);
     lv_obj_align(s_hint, LV_ALIGN_CENTER, 0, 178);
 
-    /* 케이블로 꺼내는 문. 🚨 가운데 큰 버튼 위에 겹치면 녹음을 누르려다
-     * 이걸 누른다 — 위쪽 귀퉁이로 뺀다(원 안쪽이라 dy -168, dx 108). */
+    /* The door for taking it off by cable. 🚨 Overlapping the big centre
+     * button would have this pressed instead of record — it moves to the top
+     * corner (inside the circle, dy -168, dx 108). */
     lv_obj_t *ub = lv_button_create(root);
     lv_obj_set_size(ub, 64, 40);
     lv_obj_set_style_radius(ub, 20, 0);
@@ -193,7 +198,7 @@ static void meet_enter(lv_obj_t *root)
     lv_obj_set_style_text_color(ul, lv_color_hex(0x9FB3CC), 0);
     lv_obj_center(ul);
 
-    /* 나갔다 들어와도 녹음이 돌고 있으면 그 화면으로 돌아온다 */
+    /* Leaving and coming back returns to that screen if a recording is running */
     s_st = port_rec_active() ? M_REC : M_IDLE;
     s_why = NULL;
     s_tick = lv_timer_create(tick, 500, NULL);
@@ -204,7 +209,7 @@ static void meet_leave(void)
 {
     launcher_keep_awake(false);
     if (s_tick) { lv_timer_delete(s_tick); s_tick = NULL; }
-    /* 녹음은 안 멈춘다. 회의 중에 다른 앱을 봐도 계속 담겨야 한다. */
+    /* Recording is not stopped. It has to keep piling up while other apps are open. */
 }
 
 static lv_color_t meet_tint(void) { return lv_color_hex(0xFF5B5B); }

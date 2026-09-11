@@ -1,22 +1,25 @@
-/* 알람. 시계 앱의 한 쪽이지만, **몸은 앱 밖에 산다.**
+/* The alarm. It is one page of the clock app, but **its body lives outside
+ * the app.**
  *
- * 🚨 앱 안에만 두면 시계 앱을 닫는 순간 죽는다. 울려야 할 때 앱이 열려 있을
- * 리가 없으니 그건 알람이 아니다. 그래서 시각을 보는 일(alarm_tick)은 런처가
- * 매초 부르고, 이 파일의 static 이 그 사이를 들고 있는다 — LVGL 조각만 앱을
- * 닫을 때 사라지고 상태는 남는다.
+ * 🚨 Kept inside the app it would die the moment the clock app closed. The app
+ * will not be open when the alarm is due, so that would not be an alarm at
+ * all. Watching the time (alarm_tick) is therefore the launcher's job, once a
+ * second, and the statics in this file hold everything in between — only the
+ * LVGL pieces go away when the app closes; the state stays.
  *
- * 🚨 이 보드엔 RTC 칩이 없다(0x51 이 응답하지 않는다). 전원이 완전히 끊기면
- * 시각을 잃고 1970년으로 돌아온다. 그래서 **시각이 안 맞춰졌으면 안 울린다** —
- * 1970년 기준으로 "아침 7시" 를 따지면 꽂자마자 울려댄다.
+ * 🚨 This board has no RTC chip (0x51 does not answer). Cut the power
+ * completely and the time is lost, back to 1970. So **it does not ring until
+ * the clock has been set** — judging "7 in the morning" against 1970 would
+ * have it going off the moment it is plugged in.
  *
- * 🚨 keep_awake 는 "꺼지는 걸 막는" 것뿐이라 이미 꺼진 화면은 못 켠다.
- * 타이머가 같은 데서 한 번 당했다 — 켜고, 켜진 채로 붙잡는다.
- */
+ * 🚨 keep_awake only stops the screen turning off; it cannot turn on a screen
+ * that is already off. The timer was caught by exactly this once — turn it on
+ * first, then hold it on. */
 #include "app.h"
 #include "port.h"
 #include <time.h>
 
-/* 카시오 알람 흉내. 타이머와 같은 소리를 쓴다 — 배지 안에서 한 소리로 통일. */
+/* A Casio-style alarm. Same sound as the timer — one sound throughout the badge. */
 static const uint8_t BEEP[] = {
     1,0,1,0,0,0,0,0,
     1,0,1,0,0,0,0,0,
@@ -26,16 +29,16 @@ static const uint8_t BEEP[] = {
 #define BEEP_HZ   4000
 #define BEEP_STEP 70
 
-/* ── 앱을 닫아도 남는 것 ────────────────────────────────────── */
+/* ── what survives closing the app ─────────────────────────── */
 static uint8_t s_h = 7, s_m = 0;
 static bool    s_on;
 static bool    s_loaded;
-static int     s_fired_yday = -1;   /* 오늘 이미 울렸나 — 하루 한 번 */
-static int     s_beep_i = -1;       /* -1 = 안 울림 */
-static lv_obj_t   *s_ring;          /* 울릴 때 화면을 덮는 판 */
+static int     s_fired_yday = -1;   /* has it already rung today — once a day */
+static int     s_beep_i = -1;       /* -1 = not ringing */
+static lv_obj_t   *s_ring;          /* the panel that covers the screen while ringing */
 static lv_timer_t *s_beep_timer;
 
-/* ── 앱이 열려 있을 때만 있는 것 ──────────────────────────── */
+/* ── what exists only while the app is open ───────────────── */
 static lv_obj_t *s_time_lbl, *s_state_lbl, *s_hint, *s_tog;
 
 typedef struct { uint8_t h, m, on; } saved_t;
@@ -56,7 +59,7 @@ static void load(void)
     }
 }
 
-/* ── 울리기 ─────────────────────────────────────────────────── */
+/* ── ringing ────────────────────────────────────────────────── */
 static void beep_step(lv_timer_t *t)
 {
     if (s_beep_i < 0) {
@@ -65,7 +68,7 @@ static void beep_step(lv_timer_t *t)
         s_beep_timer = NULL;
         return;
     }
-    /* 사람이 끌 때까지 운다. 묶음을 처음부터 다시 돈다. */
+    /* It cries until somebody stops it. Start the run again from the top. */
     if (s_beep_i >= (int)sizeof(BEEP)) s_beep_i = 0;
     port_tone_freq(BEEP_HZ);
     port_tone_enable(BEEP[s_beep_i] != 0);
@@ -84,12 +87,12 @@ static void start_ring(void)
 {
     if (s_beep_i >= 0) return;
     s_beep_i = 0;
-    port_tone_hold(true);          /* 우는 동안 코덱을 붙잡아 첫 소리를 안 놓친다 */
-    launcher_screen_on();          /* 🚨 먼저 켠다. 붙잡기만 하면 깜깜한 채 운다 */
+    port_tone_hold(true);          /* hold the codec while it cries so the first note is not lost */
+    launcher_screen_on();          /* 🚨 turn it on first. Holding alone cries in the dark */
     launcher_keep_awake_by(AWAKE_RING, true);
 
-    /* 🚨 어느 앱이 열려 있든 덮어야 한다. 그래서 맨 위 층에 만든다 —
-     * 앱이 제 화면을 지워도 이건 안 지워진다. */
+    /* 🚨 It has to cover whichever app is open, so it is built on the top
+     * layer — an app deleting its own screen does not delete this. */
     s_ring = lv_obj_create(lv_layer_top());
     lv_obj_remove_style_all(s_ring);
     lv_obj_set_size(s_ring, 466, 466);
@@ -118,45 +121,47 @@ static void stop_ring(void)
 {
     s_beep_i = -1;
     port_tone_enable(false);
-    port_tone_hold(false);         /* 그친 뒤엔 코덱을 놓아 절전으로 */
+    port_tone_hold(false);         /* let the codec go once it stops, back to low power */
     launcher_keep_awake_by(AWAKE_RING, false);
     if (s_ring) { lv_obj_delete(s_ring); s_ring = NULL; }
 }
 
-/* ── 런처가 매초 부른다 ─────────────────────────────────────── */
+/* ── the launcher calls this once a second ──────────────────── */
 void alarm_tick(void)
 {
     load();
     if (!s_on || s_beep_i >= 0) return;
 
-    /* 🚨 시각이 안 맞춰졌으면 안 울린다. RTC 가 없어 전원이 끊기면 1970년
-     * 으로 돌아오는데, 거기서 "아침 7시" 를 따지면 꽂자마자 울려댄다.
-     * 2001년보다 이르면 안 맞춰진 것으로 본다. */
+    /* 🚨 It does not ring until the clock has been set. With no RTC, losing
+     * power puts us back in 1970, and judging "7 in the morning" there has it
+     * going off the moment it is plugged in. Anything before 2001 counts as
+     * unset. */
     time_t now = time(NULL);
     if (now < 978307200) return;
 
     struct tm tm;
     localtime_r(&now, &tm);
     if (tm.tm_hour != s_h || tm.tm_min != s_m) return;
-    if (s_fired_yday == tm.tm_yday) return;     /* 하루 한 번 */
+    if (s_fired_yday == tm.tm_yday) return;     /* once a day */
     s_fired_yday = tm.tm_yday;
     start_ring();
 }
 
-/* ── 쪽 화면 ────────────────────────────────────────────────── */
+/* ── the page ───────────────────────────────────────────────── */
 static void paint(void)
 {
     if (!s_time_lbl) return;
     lv_label_set_text_fmt(s_time_lbl, "%02u:%02u", s_h, s_m);
-    /* 🚨 꺼졌을 때를 0x44444E 로 뒀더니 검정 바탕에 묻혀 안 보였다(0910 지적).
-     * 꺼진 것도 읽혀야 몇 시로 맞춰뒀는지 안다 — 초록만 아니면 된다. */
+    /* 🚨 Off used to be 0x44444E, which sank into the black background and
+     * could not be seen (raised 09-10). Off has to be readable too, or there
+     * is no telling what it is set to — anything but green will do. */
     lv_obj_set_style_text_color(s_time_lbl,
         s_on ? lv_color_hex(0x5BD48A) : lv_color_hex(0xA8AEBC), 0);
     lv_label_set_text(s_state_lbl, s_on ? "on" : "off");
     lv_obj_set_style_text_color(s_state_lbl,
         s_on ? lv_color_hex(0x081A10) : lv_color_hex(0xD2D8E4), 0);
-    /* 켜짐/꺼짐을 글씨가 아니라 판 색으로 먼저 보이게 한다 — 둥근 화면에서
-     * 세 글자를 읽게 하는 것보다 색 덩어리가 빠르다. */
+    /* Show on/off through the panel colour rather than the text — a block of
+     * colour reads faster than three letters on a round screen. */
     if (s_tog) {
         lv_obj_set_style_bg_color(s_tog,
             s_on ? lv_color_hex(0x5BD48A) : lv_color_hex(0x30303C), 0);
@@ -176,16 +181,17 @@ static void bump_cb(lv_event_t *e)
         case 3: s_m = (uint8_t)((s_m + 55) % 60); break;
         case 4: s_on = !s_on; break;
     }
-    /* 시각을 바꾸면 "오늘 울렸다" 는 기록도 지운다 — 방금 지난 시각으로
-     * 맞춰놓고 왜 안 우냐고 하지 않게. */
+    /* Changing the time also clears "rang today" — so that setting it to a
+     * moment just past does not leave somebody asking why it is silent. */
     s_fired_yday = -1;
     save();
     paint();
 }
 
-/* 🚨 판 색이 0x1D1D24 라 검정 바탕에서 버튼이 어디 있는지 안 보였다(0910
- * 지적). 이 화면은 눈으로 겨냥해 누르는 곳이라 테두리까지 줘서 경계를
- * 분명히 한다 — 손가락 자리는 96×72 로 키웠다(전 78×58). */
+/* 🚨 The panel colour is 0x1D1D24, which left the buttons invisible against
+ * the black background (raised 09-10). This screen is aimed at by eye, so the
+ * borders are drawn in to mark the edges — and the finger targets grew to
+ * 96×72 (from 78×58). */
 static lv_obj_t *mk_btn(lv_obj_t *root, int dx, int dy, const char *txt, int what)
 {
     lv_obj_t *b = lv_button_create(root);
@@ -216,26 +222,30 @@ void alarm_build(lv_obj_t *root)
     lv_obj_set_style_text_font(s_time_lbl, &lv_font_montserrat_48, 0);
     lv_obj_align(s_time_lbl, LV_ALIGN_CENTER, 0, -4);
 
-    /* 시 ▲▼ 는 왼쪽, 분 ▲▼ 는 오른쪽. 숫자를 사이에 두어 무엇을 바꾸는지
-     * 자리로 알게 한다 — 둥근 화면이라 글로 적을 자리가 아깝다.
-     * 🚨 자리는 원 안에서 잡는다. 제일 먼 모서리(-160,-116)가 중심에서 198px
-     * 이라 반지름 233 안에 든다 — 넓힐 때마다 이걸 다시 따져야 잘리지 않는다. */
+    /* Hours ▲▼ on the left, minutes ▲▼ on the right, with the number between
+     * them so that position alone says what each pair changes — on a round
+     * screen there is no room to spare for words.
+     * 🚨 Positions are worked out inside the circle. The furthest corner
+     * (-160,-116) is 198 px from the centre, inside the radius of 233 — check
+     * this again every time something grows, or it will be cut off. */
     mk_btn(root, -112, -80, LV_SYMBOL_UP,   0);
     mk_btn(root, -112,  62, LV_SYMBOL_DOWN, 1);
     mk_btn(root,  112, -80, LV_SYMBOL_UP,   2);
     mk_btn(root,  112,  62, LV_SYMBOL_DOWN, 3);
 
-    /* 🚨 토글을 화살표와 같은 줄에 뒀더니 좌우로 7px 씩 물렸다(0910 시뮬).
-     * 한 줄 아래로 내린다 — 제일 먼 모서리가 중심에서 198px 이라 안전하다. */
+    /* 🚨 With the toggle on the same row as the arrows it overlapped them by
+     * 7 px on each side (09-10, in the simulator). It moves one row down —
+     * the furthest corner is 198 px from the centre, so it is safe. */
     s_tog = mk_btn(root, 0, 152, "", 4);
     lv_obj_set_size(s_tog, 150, 62);
     s_state_lbl = lv_label_create(s_tog);
     lv_obj_set_style_text_font(s_state_lbl, &lv_font_montserrat_24, 0);
     lv_obj_center(s_state_lbl);
 
-    /* 🚨 한 라벨에 "hour        min" 으로 넣었더니 두 낱말이 가운데로 몰려
-     * 버튼 기둥 위가 아니라 숫자 위에 떴다(0910 시뮬). 기둥마다 하나씩 —
-     * 이름은 제가 가리키는 것 바로 위에 있어야 한다. */
+    /* 🚨 Putting "hour        min" in a single label pushed both words toward
+     * the middle, so they sat over the number instead of over the button
+     * columns (09-10, in the simulator). One label per column — a name has to
+     * be directly above what it names. */
     s_hint = lv_label_create(root);
     lv_label_set_text(s_hint, "hour");
     lv_obj_set_style_text_font(s_hint, &lv_font_montserrat_20, 0);
@@ -253,7 +263,8 @@ void alarm_build(lv_obj_t *root)
 
 void alarm_free(void)
 {
-    /* 🚨 조각만 놓는다. 울리는 것과 맞춰둔 시각은 앱 밖의 것이라 안 건드린다 —
-     * 여기서 stop_ring 을 부르면 시계 앱을 닫는 순간 알람이 그친다. */
+    /* 🚨 Only the pieces go. Ringing and the set time live outside the app and
+     * are left alone — calling stop_ring here would silence the alarm the
+     * moment the clock app closed. */
     s_time_lbl = s_state_lbl = s_hint = s_tog = NULL;
 }

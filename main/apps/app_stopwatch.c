@@ -1,39 +1,43 @@
-/* 스톱워치. 시계 앱의 한 쪽으로 산다(타일뷰에서 위아래로 넘긴다).
+/* The stopwatch. It lives as one page of the clock app (swiped vertically in
+ * the tileview).
  *
- * 타이머가 "남은 시간을 링으로 본다" 면 이쪽은 숫자가 주인공이다 — 재는 게
- * 목적이라 눈이 숫자에 붙는다. 그래서 링은 안 그리고 큰 글씨만 둔다.
+ * Where the timer is "watch the ring shrink", here the digits are the whole
+ * point — the eye is on the number because measuring is what it is for. So
+ * there is no ring, just large text.
  *
- * 🚨 도는 동안 화면이 꺼지면 안 된다(0910 지적). 다만 **도는 동안만** 붙잡는다.
- * 아예 못 꺼지게 두면 책상에 올려놔도 화면이 살아 배터리를 태운다 — 물 앱에서
- * 같은 판단을 했다. 멈추면 곧바로 놓는다.
+ * 🚨 The screen must not go off while it runs (raised 09-10). But it is held
+ * **only while running**. Blocking it outright would keep the screen alive on
+ * a desk and burn the battery — the water app made the same call. It lets go
+ * the instant it stops.
  *
- * 🚨 숫자를 라벨 하나에 통째로 넣으면 안 된다(0910 지적). 몽세라는 글자마다
- * 폭이 다른 글꼴이라 1 과 8 의 폭이 다르다. 가운데 맞춤 라벨 하나에 넣으면
- * 100분의 1초가 바뀔 때마다 전체 폭이 달라져 숫자가 좌우로 덜덜 떤다.
- * 글자마다 제 칸을 주고 칸 폭을 숫자 최대폭으로 고정한다 — 자리는 안 움직이고
- * 글자만 바뀐다. 아래 row_t 가 그 일을 한다.
+ * 🚨 The digits must not go into one label (raised 09-10). Montserrat is a
+ * proportional font, so 1 and 8 are different widths. In a single centred
+ * label the total width changes every hundredth of a second and the number
+ * shivers left and right. Each character gets its own cell, and the cell
+ * width is fixed at the widest digit — the positions hold still and only the
+ * glyphs change. row_t below does that.
  */
 #include "app.h"
 #include "port.h"
 #include <stdio.h>
 #include <string.h>
 
-/* ── 고정폭 숫자 줄 ─────────────────────────────────────────── */
+/* ── the fixed-width digit row ──────────────────────────────── */
 #define SLOT_N 8
 
 typedef struct {
     lv_obj_t *slot[SLOT_N];
-    char      ch[SLOT_N];      /* 지금 그 칸에 든 글자 — 안 바뀌면 안 건드린다 */
-    int16_t   dw, sw;          /* 숫자 칸 폭, 구분표(: .) 칸 폭 */
+    char      ch[SLOT_N];      /* the character in each cell — untouched if unchanged */
+    int16_t   dw, sw;          /* digit cell width, separator (: .) cell width */
     int16_t   dx, dy;
-    uint32_t  sig;             /* 칸 배치가 실제로 바뀌었을 때만 다시 놓는다 */
+    uint32_t  sig;             /* re-laid out only when the cells actually moved */
     uint32_t  col;
 } row_t;
 
 static void row_measure(row_t *r, const lv_font_t *f, int pad)
 {
-    /* 칸 폭은 글꼴에서 직접 잰다. 숫자는 그중 제일 넓은 것에 맞춘다 —
-     * 그래야 어떤 숫자가 와도 칸이 안 흔들린다. */
+    /* Cell widths are measured from the font itself. Digits use the widest of
+     * them — that way no digit can shake the cell. */
     uint16_t dw = 0;
     for (uint32_t c = '0'; c <= '9'; c++) {
         uint16_t w = lv_font_get_glyph_width(f, c, 0);
@@ -42,8 +46,9 @@ static void row_measure(row_t *r, const lv_font_t *f, int pad)
     uint16_t sw = lv_font_get_glyph_width(f, ':', 0);
     uint16_t pw = lv_font_get_glyph_width(f, '.', 0);
     if (pw > sw) sw = pw;
-    /* pad 는 칸 사이를 벌리는 여유다. 글자 폭에 딱 맞추면 큰 글꼴에서 숫자가
-     * 서로 붙어 답답해 보인다 — 큰 줄일수록 넉넉하게. */
+    /* pad is the breathing room between cells. Fitting the glyph exactly makes
+     * digits crowd each other in the large font — the bigger the row, the
+     * more generous. */
     r->dw = (int16_t)(dw + pad);
     r->sw = (int16_t)(sw + pad);
 }
@@ -67,7 +72,7 @@ static void row_make(row_t *r, lv_obj_t *root, const lv_font_t *f,
     }
 }
 
-/* 여덟 글자까지. 숫자면 넓은 칸, : 나 . 이면 좁은 칸. */
+/* Up to eight characters. A digit gets a wide cell, a : or . a narrow one. */
 static void row_set(row_t *r, const char *s)
 {
     if (!r->slot[0]) return;
@@ -114,25 +119,26 @@ static void row_color(row_t *r, uint32_t col)
         lv_obj_set_style_text_color(r->slot[i], lv_color_hex(col), 0);
 }
 
-/* 여덟 글자짜리 한 줄의 폭. "lap" 을 그 왼쪽에 붙일 때 쓴다. */
+/* The width of an eight-character row. Used to put "lap" to its left. */
 static int row_width8(const row_t *r) { return 6 * r->dw + 2 * r->sw; }
 
-/* ── 상태 ───────────────────────────────────────────────────── */
+/* ── state ──────────────────────────────────────────────────── */
 static row_t       s_bigrow, s_laprow;
 static lv_obj_t   *s_lapword, *s_hint;
 static lv_timer_t *s_tick;
 
 static bool     s_run;
-static uint32_t s_base_ms;      /* 돌기 시작한 시각 */
-static uint32_t s_acc_ms;       /* 멈춰 있던 동안 쌓아둔 것 */
-static uint32_t s_lap_ms;       /* 마지막으로 끊은 자리 */
+static uint32_t s_base_ms;      /* when it started running */
+static uint32_t s_acc_ms;       /* what piled up while it was stopped */
+static uint32_t s_lap_ms;       /* where the last lap was taken */
 static uint32_t s_press_ms;
 static bool     s_long_done;
 
 static uint32_t elapsed(void)
 {
-    /* 🚨 lv_tick_get() 은 32비트 밀리초라 49일에 한 번 넘친다. 뺄셈은 넘쳐도
-     * 맞으므로(부호 없는 산술) 이 식은 그대로 옳다 — 값을 직접 견주지 말 것. */
+    /* 🚨 lv_tick_get() is 32-bit milliseconds and wraps every 49 days.
+     * Subtraction is still correct across the wrap (unsigned arithmetic), so
+     * this expression holds — just never compare the values directly. */
     return s_acc_ms + (s_run ? (lv_tick_get() - s_base_ms) : 0);
 }
 
@@ -143,7 +149,7 @@ static void paint(void)
     uint32_t ss = (ms / 1000) % 60;
     uint32_t mm = (ms / 60000) % 60;
     uint32_t hh =  ms / 3600000;
-    if (hh > 99) hh = 99;          /* 여덟 칸을 넘기지 않는다 */
+    if (hh > 99) hh = 99;          /* never spill past the eight cells */
 
     char buf[16];
     if (hh) snprintf(buf, sizeof buf, "%lu:%02lu:%02lu",
@@ -175,8 +181,8 @@ static void paint(void)
 static void tick(lv_timer_t *t)
 {
     (void)t;
-    /* 🔋 안 돌면 다시 칠할 이유가 없다. 화면이 꺼졌어도 마찬가지다 —
-     * 다만 시간은 계속 흐른다(elapsed 가 시계에서 뽑으므로 안 밀린다). */
+    /* 🔋 Not running, no reason to repaint. The same goes for a screen that is
+     * off — time still passes (elapsed reads the clock, so nothing drifts). */
     if (!s_run) return;
     if (launcher_screen_is_off()) return;
     paint();
@@ -191,8 +197,9 @@ static void set_run(bool on)
         s_acc_ms = elapsed();
     }
     s_run = on;
-    /* 🚨 도는 동안만 붙잡는다. 여럿이 동시에 잡을 수 있으므로 제 몫으로만
-     * 잡는다 — 타이머 알람이 울리는 중에 스톱워치를 멈춰도 알람 쪽이 안 풀린다. */
+    /* 🚨 Held only while running. Several things can hold at once, so it takes
+     * only its own — stopping the stopwatch while a timer alarm is ringing
+     * does not release the alarm's hold. */
     launcher_keep_awake_by(AWAKE_STOP, s_run);
     paint();
 }
@@ -206,9 +213,9 @@ static void press_cb(lv_event_t *e)
         if (s_long_done || lv_tick_get() - s_press_ms < 600) return;
         s_long_done = true;
         if (s_run) {
-            s_lap_ms = elapsed();          /* 돌 때 길게 = 랩 */
+            s_lap_ms = elapsed();          /* long press while running = lap */
         } else {
-            s_acc_ms = 0; s_lap_ms = 0;    /* 멈췄을 때 길게 = 되돌리기 */
+            s_acc_ms = 0; s_lap_ms = 0;    /* long press while stopped = reset */
         }
         paint();
         return;
@@ -229,13 +236,14 @@ void stopwatch_build(lv_obj_t *root)
     lv_obj_set_style_bg_color(root, lv_color_hex(0x000000), 0);
     lv_obj_set_style_bg_opa(root, LV_OPA_COVER, 0);
 
-    /* 재는 게 목적인 화면이라 숫자를 있는 대로 키운다 — 48이 이 펌웨어에
-     * 들어 있는 제일 큰 글꼴이다. 칸을 6px 씩 벌려 답답하지 않게. */
+    /* This screen exists to be read, so the digits are as large as they go —
+     * 48 is the biggest font in this firmware. Cells are spread 6 px apart so
+     * they do not crowd. */
     row_make(&s_bigrow, root, &lv_font_montserrat_48, 0, -26, 6, 0x7FB0FF);
 
-    /* 랩은 "lap" 을 왼쪽에 붙이고 숫자는 그 오른쪽에. 숫자 줄은 늘 여덟 칸이라
-     * 폭이 정해져 있어서 둘을 미리 붙여 놓을 수 있다 — 랩이 바뀌어도 "lap" 이
-     * 안 밀린다. */
+    /* The lap puts "lap" on the left with the digits to its right. A digit row
+     * is always eight cells, so the width is known and the two can be placed
+     * ahead of time — "lap" does not shift when the lap changes. */
     lv_point_t wsz;
     lv_text_get_size(&wsz, "lap", &lv_font_montserrat_24, 0, 0, LV_COORD_MAX, 0);
     row_t probe;
@@ -260,14 +268,15 @@ void stopwatch_build(lv_obj_t *root)
     lv_obj_set_style_text_color(s_hint, lv_color_hex(0x5A5A66), 0);
     lv_obj_align(s_hint, LV_ALIGN_CENTER, 0, 122);
 
-    /* 🚨 타일뷰 안이라 위아래 쓸기가 쪽 넘기기로 먼저 먹힌다. 누름만 받는다. */
+    /* 🚨 Inside a tileview, a vertical swipe is taken as turning the page. Only presses here. */
     lv_obj_add_flag(root, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(root, press_cb, LV_EVENT_PRESSED,  NULL);
     lv_obj_add_event_cb(root, press_cb, LV_EVENT_PRESSING, NULL);
     lv_obj_add_event_cb(root, press_cb, LV_EVENT_RELEASED, NULL);
 
-    /* 100분의 1초가 눈에 흐르게 하려면 이보다 느리면 안 된다. 도는 동안만
-     * 실제로 일하므로(위 tick) 멈춰 있을 때의 값은 0 이다. */
+    /* Hundredths have to look like they are flowing, so this cannot be slower.
+     * It only does real work while running (tick above), so the cost while
+     * stopped is zero. */
     s_tick = lv_timer_create(tick, 47, NULL);
     paint();
 }
@@ -275,11 +284,11 @@ void stopwatch_build(lv_obj_t *root)
 void stopwatch_free(void)
 {
     if (s_tick) { lv_timer_delete(s_tick); s_tick = NULL; }
-    /* 🚨 나가면 놓는다. 안 놓으면 시계 앱을 닫아도 화면이 안 꺼진다. */
+    /* 🚨 Let go on the way out. Otherwise the screen never turns off, even with the clock app closed. */
     launcher_keep_awake_by(AWAKE_STOP, false);
     s_run = false;
-    /* 🚨 조각은 타일과 함께 이미 지워졌다. 가리키던 것만 지운다 — 남겨두면
-     * 다음에 열 때 없어진 자리를 만진다. */
+    /* 🚨 The pieces went with the tile already. Only the pointers are cleared —
+     * left behind, the next open would touch something that is gone. */
     memset(&s_bigrow, 0, sizeof s_bigrow);
     memset(&s_laprow, 0, sizeof s_laprow);
     s_lapword = s_hint = NULL;

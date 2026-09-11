@@ -19,7 +19,7 @@ does a handful of things well rather than many things badly.
 | **Clock** | Digital LCD face, plus timer, stopwatch and alarm |
 | **Recorder** | 16 kHz IMA-ADPCM to flash, about 52 minutes. Plug in and it appears as a read-only USB drive full of `.WAV` files |
 | **Games** | Brick breaker (5 levels), pinball, marble maze, bubble wrap |
-| **Fidgets** | A pool of water and a small solar system, both driven by the accelerometer |
+| **Fidgets** | A pool of water and a small solar system, both driven by the accelerometer. Every planet surface is generated in code — no image files |
 | **Calc · Keys** | A calculator, and a set of shortcut keys over the same HID link |
 
 There is no cloud anything. WiFi is used for exactly two things — setting the

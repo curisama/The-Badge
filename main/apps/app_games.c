@@ -1687,7 +1687,7 @@ static void enter_water(lv_obj_t *root)
 }
 
 /* ── the planets ─────────────────────────────────────────────
- * Pick one of five. Five separate apps would crowd the home screen, and there
+ * Pick one of four. Four separate apps would crowd the home screen, and there
  * is only one renderer and one table anyway. The choice is remembered and
  * opens straight into it next time. */
 static orb_kind_t s_orb_pick = ORB_MOON;

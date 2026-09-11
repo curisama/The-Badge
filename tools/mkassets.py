@@ -260,7 +260,12 @@ def make_app_icons():
     emit("app_icon_meet", mt, "RGB565A8")
 
     # Water, moon, earth — the screen shrunk down. The same approach as the other icons.
-    # 🚨 The simulator screens have to be captured first: shots/icon_{water,moon,earth}.png
+    # 🚨 The simulator screens have to be captured first:
+    #    shots/icon_{water,moon,earth}.png
+    #    Drive sim/badge_sim --serve, open the app, send '#' to hide the buttons,
+    #    then 'F' for the frame. Without the '#' the back button ends up baked
+    #    into the icon as a smudge on the rim — that is how it shipped for a
+    #    while. tools/capture-icons.py does the whole thing.
     for nm, crop in (("water", None), ("moon", None), ("earth", None)):
         f = os.path.join(SHOTS, f"icon_{nm}.png")
         if not os.path.exists(f):

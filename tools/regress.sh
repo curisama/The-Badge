@@ -221,12 +221,35 @@ grep -qE "real interval" main/apps/app_water.c \
   && grep -qE "real interval" main/apps/orb.c \
   && ok "compute time and the real interval are measured together" || bad "only compute time is being measured"
 
-echo "════ the orb photographs ════"
-# 🚨 A picture made in code must never be written over a real baked photograph
-#    (the sun and Jupiter all came out as the earth. "fetched" and "baked in" are different words)
-grep -q "s_tex_bake" main/apps/orb.c \
-  && grep -q "if (s_tex_bake) { if (kind == ORB_MOON)" main/apps/orb.c \
-  && ok "nothing is written over the real photographs" || bad "a made-up picture is written over a photograph"
+echo "════ the orb textures ════"
+# 🚨 Two separate scars here.
+#    1. A picture made in code must never be written over a photograph someone
+#       baked in with tools/make-orb-texture.py — hence the s_tex_bake guard.
+#    2. Every kind needs its own bake. The Sun and Jupiter used to fall through
+#       to bake_earth() and both came out as the Earth.
+#    Do not pin this to the shape of the code — that check broke the moment the
+#    if became a switch. Read the kinds out of the header and look for each one.
+python3 - <<'EOF' && ok "every orb kind bakes its own, and only when nothing was baked in" || bad "an orb kind has no bake of its own, or a bake overwrites a baked-in photograph"
+import re, sys
+hdr = open("main/apps/orb.h", encoding="utf-8").read()
+src = open("main/apps/orb.c", encoding="utf-8").read()
+m = re.search(r"typedef enum \{([^}]*)\} orb_kind_t", hdr)
+if not m: print("  cannot find orb_kind_t"); sys.exit(1)
+kinds = [k.strip() for k in m.group(1).split(",") if k.strip()]
+kinds = [k for k in kinds if k != "ORB_N"]
+if len(kinds) < 2: print("  orb_kind_t looks wrong:", kinds); sys.exit(1)
+
+blk = re.search(r"if \(s_tex_bake\)\s*\{(.*?)\n    \}", src, re.S)
+if not blk: print("  the bake is not guarded by s_tex_bake"); sys.exit(1)
+body = blk.group(1)
+missing = []
+for k in kinds:
+    fn = "bake_" + k[len("ORB_"):].lower()
+    if ("static void %s(void)" % fn) not in src: missing.append(fn + "() is not defined")
+    elif (fn + "()") not in body:               missing.append(fn + "() is never reached")
+if missing:
+    print("  " + " · ".join(missing)); sys.exit(1)
+EOF
 
 echo "════ the orbs' attitude ════"
 # 🚨 An axis that cannot lean sideways is a turntable, and Saturn's rings would lie flat forever
@@ -258,6 +281,28 @@ if [ -f build/badge_fw.bin ] && [ ! -f build/.ninja_lock ]; then
   # 🚨 An orb photograph is 256 KB each. Adding more means reworking the partitions.
   [ "$LEFT" -gt 524288 ] && ok "at least 512KB free" \
     || bad "the app partition is tight — one orb photograph is 256KB"
+fi
+
+echo "════ the sdkconfig defaults ════"
+# 🚨 A misspelt symbol in sdkconfig.defaults is not an error. Kconfig prints one
+#    line during reconfigure and carries on with the default, so the setting you
+#    thought you made was never made. CONFIG_ESP_COREDUMP_CHECKSUM_SHA sat there
+#    for weeks doing nothing (the symbol is _SHA256). Every line here has to turn
+#    up in the generated sdkconfig.
+if [ -f sdkconfig ]; then
+python3 - <<'EOF' && ok "every symbol in sdkconfig.defaults reached sdkconfig" || bad "a symbol in sdkconfig.defaults does not exist"
+import re, sys
+have = set(re.findall(r"^#?\s*(CONFIG_[A-Z0-9_]+)", open("sdkconfig", encoding="utf-8").read(), re.M))
+bad = []
+for ln in open("sdkconfig.defaults", encoding="utf-8"):
+    m = re.match(r"^(CONFIG_[A-Z0-9_]+)=", ln.strip())
+    if m and m.group(1) not in have:
+        bad.append(m.group(1))
+if bad:
+    print("  not a real symbol:", " · ".join(bad)); sys.exit(1)
+EOF
+else
+  echo "  · no sdkconfig yet — skipped (try again after idf.py build)"
 fi
 
 echo "════ the build list ════"

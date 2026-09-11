@@ -230,12 +230,27 @@ static void write_png(const char *name, int mask_corners)
     fprintf(stderr, "shot: %s\n", png);
 }
 
+/* Hides every button below obj, used by the '#' command when capturing app
+ * icons. An icon is the app's screen shrunk to 120 px, and at that size a
+ * button is an unreadable dark smudge on the rim. */
+static void hide_buttons(lv_obj_t *obj)
+{
+    uint32_t n = lv_obj_get_child_count(obj);
+    for (uint32_t i = 0; i < n; i++) {
+        lv_obj_t *c = lv_obj_get_child(obj, i);
+        if (lv_obj_check_type(c, &lv_button_class)) lv_obj_add_flag(c, LV_OBJ_FLAG_HIDDEN);
+        else hide_buttons(c);
+    }
+}
+
 /* ── interactive mode ────────────────────────────────────────
  * It takes one command per line:
  *   T <x> <y> <0|1>   touch
  *   H                 home button (BOOT)
  *   N <n>             how many fingers are down right now
  *   W                 short PWR press (toggles the screen)
+ *   #                 hide the chrome (for capturing app icons)
+ *                     🚨 A..Z are all taken, hence the punctuation.
  *   P <ms>            advance by that much
  *   F                 ask for a frame → "FRAME <bytes>\n" + raw RGB888
  *   R                 ask for a frame → "FRAME <bytes>\n" + raw RGB565 (half the size)
@@ -284,6 +299,21 @@ static void serve_loop(void)
             printf("JITTER %u\n", g_jitter_max);
             fflush(stdout);
             break;
+        case '#': {
+            /* Strip the chrome, for capturing app icons. The icons in
+             * main/assets/ are the app's own screen shrunk to 120 px, so the
+             * back button and the home handle must not be in the picture —
+             * at that size they are a dark smudge near the rim.
+             * The app builds its own picture first and its buttons after, so
+             * child 0 is the picture and everything after it is chrome. */
+            launcher_handle_show(false);
+            /* 🚨 "Hide everything after child 0" is not enough — an app hangs
+             * its own root under the screen and its buttons under that, and
+             * which index the picture sits at differs per app. Walk the whole
+             * tree and hide the buttons, wherever they are. */
+            hide_buttons(lv_screen_active());
+            break;
+        }
         case 'D': {
             int op = atoi(line + 1);
             if (op == 0) {

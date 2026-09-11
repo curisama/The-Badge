@@ -25,8 +25,8 @@ TILE = 64
 COLS = (SIZE + TILE - 1) // TILE
 
 # 🚨 Screens where everything changes every frame (water, moon, earth) have to
-#    send the whole 434 KB, which at 30fps is 13 MB a second — over a remote link
-#    that is the bottleneck. Sending at half resolution cuts it to a quarter
+#    send the whole 434 KB, which at 30fps is 13 MB a second — over anything
+#    but a local network that is the bottleneck. Sending at half resolution cuts it to a quarter
 #    (3.3 MB a second) and the browser scales it up. Nothing is lost for
 #    watching movement, and ?full=1 turns it off when the detail is needed.
 SCALE = int(os.environ.get("SIM_SCALE", "2"))     # 1 = full, 2 = half

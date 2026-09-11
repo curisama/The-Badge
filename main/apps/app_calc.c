@@ -87,9 +87,12 @@ static void clear_all(void)
     show_sub();
 }
 
-static void key_cb(lv_event_t *e)
+/* 🚨 One place decides what a key does. There used to be two — a callback from
+ * back when every key was its own widget, and a copy inside the touch handler
+ * that replaced it. The widget version was dead but still compiled, so fixing
+ * a key here would have silently missed the one that runs. */
+static void key_press(char k)
 {
-    char k = (char)(intptr_t)lv_event_get_user_data(e);
     if (k >= '0' && k <= '9')      digit(k - '0');
     else if (k == '.')             { if (s_fresh) { s_cur = 0; s_fresh = false; } if (s_frac == 0) s_frac = 0.1; }
     else if (k == '=')             equals();
@@ -248,13 +251,7 @@ static void panel_touch(lv_event_t *e)
 
     int r, c;
     if (!hit_cell(p.x, p.y, &r, &c)) return;
-    char id = KEY[r][c][0];
-
-    if (id >= '0' && id <= '9')      digit(id - '0');
-    else if (id == '.')              { if (s_fresh) { s_cur = 0; s_fresh = false; } if (s_frac == 0) s_frac = 0.1; }
-    else if (id == '=')              equals();
-    else if (id == 'C')              clear_all();
-    else                             op_key(id);
+    key_press(KEY[r][c][0]);
 }
 
 static void enter(lv_obj_t *root)

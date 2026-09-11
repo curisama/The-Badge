@@ -176,7 +176,10 @@ static orb_kind_t  s_kind;
  * Value noise at several scales. It has to wrap along longitude or the seam shows. */
 static uint32_t hash2(int x, int y)
 {
-    uint32_t h = (uint32_t)(x * 374761393) + (uint32_t)(y * 668265263);
+    /* 🚨 Multiply as unsigned. Done in int these overflow, which is undefined
+     * behaviour, and GCC says so the moment it can fold a constant argument —
+     * bake_sun's hash2(i * 37, 991) made it shout. The bits are identical. */
+    uint32_t h = (uint32_t)x * 374761393u + (uint32_t)y * 668265263u;
     h = (h ^ (h >> 13)) * 1274126177u;
     return h ^ (h >> 16);
 }
@@ -308,6 +311,132 @@ static void bake_earth(void)
                 g = (int)(g * (1 - k) + 250 * k);
                 b = (int)(b * (1 - k) + 252 * k);
             }
+            s_tex_owned[y * TEX_W + x] = rgb565(r, g, b);
+        }
+    }
+}
+
+/* Jupiter. The belts and zones are bands of latitude, which on their own look
+ * like a deck chair. What makes them read as Jupiter is that the boundary
+ * between two bands is pushed sideways by turbulence stretched along
+ * longitude — the flow is zonal, so the noise has to be too, and the edges
+ * curl instead of running straight. */
+static void bake_jupiter(void)
+{
+    for (int y = 0; y < TEX_H; y++) {
+        float fy = (float)y / TEX_H;
+        float lat = (0.5f - fy) * 2.0f;              /* +1 north pole .. -1 south */
+        for (int x = 0; x < TEX_W; x++) {
+            float fx = (float)x / TEX_W;
+            /* Six times the detail across latitude as along longitude */
+            float warp = fbm(fx * 4, fy * 24, 5, 4) - 0.5f;
+            float l    = lat + warp * 0.13f;
+
+            /* Alternating bands. The cosine sets how many; raising it to a
+             * power pinches the light zones so the dark belts dominate. */
+            float band = 0.5f + 0.5f * cosf(l * 14.5f);
+            float t    = band * band * (3 - 2 * band);          /* 0 belt .. 1 zone */
+
+            /* belt: red-brown · zone: pale cream */
+            int r = (int)(168 + (232 - 168) * t);
+            int g = (int)(118 + (216 - 118) * t);
+            int b = (int)( 78 + (186 -  78) * t);
+
+            /* Fine streaks along the flow, so a band is not flat colour */
+            float streak = fbm(fx * 8 + 3.1f, fy * 48 + 1.7f, 4, 8) - 0.5f;
+            r += (int)(streak * 34); g += (int)(streak * 30); b += (int)(streak * 24);
+
+            /* The poles are cooler and hazier than the tropics */
+            float pole = (fabsf(lat) - 0.62f) / 0.38f;
+            if (pole > 0) {
+                float k = pole > 1 ? 1 : pole;
+                k *= 0.72f;
+                r = (int)(r * (1 - k) + 132 * k);
+                g = (int)(g * (1 - k) + 126 * k);
+                b = (int)(b * (1 - k) + 134 * k);
+            }
+
+            /* The Great Red Spot. An ellipse wider than it is tall, with a
+             * paler collar — a hard edge looks like a sticker. */
+            float dx = fx - 0.63f;
+            if (dx >  0.5f) dx -= 1.0f;                 /* it must wrap at the seam */
+            if (dx < -0.5f) dx += 1.0f;
+            /* 🚨 The radii are not in the same units. The map is 512 wide and
+             * 256 tall while latitude spans 2, so a latitude radius has to be
+             * four times a longitude one to draw the same shape — written as
+             * 0.105 and 0.052 the spot came out eight times wider than tall,
+             * a red stripe across the planet. */
+            float dy = (lat - (-0.23f)) * 0.25f;
+            float d  = sqrtf((dx / 0.105f) * (dx / 0.105f) + (dy / 0.048f) * (dy / 0.048f));
+            if (d < 1.4f) {
+                /* One falloff for the whole thing. Two — a body and a collar —
+                 * left a visible step where they met. */
+                float k = 1.0f - d / 1.4f;
+                k = k * k * (3 - 2 * k);
+                r = (int)(r * (1 - k) + 186 * k);
+                g = (int)(g * (1 - k) +  96 * k);
+                b = (int)(b * (1 - k) +  72 * k);
+            }
+            s_tex_owned[y * TEX_W + x] = rgb565(r, g, b);
+        }
+    }
+}
+
+/* The Sun. Granulation is the whole picture: convection cells a shade brighter
+ * in the middle with darker lanes between them. Two scales of noise give the
+ * cells and the grain inside them; a handful of spots break up the surface so
+ * that turning it actually reads as turning. */
+static void bake_sun(void)
+{
+    for (int y = 0; y < TEX_H; y++) {
+        float fy = (float)y / TEX_H;
+        float lat = (0.5f - fy) * 2.0f;
+        for (int x = 0; x < TEX_W; x++) {
+            float fx = (float)x / TEX_W;
+            float cell = fbm(fx * 22, fy * 22, 3, 22);
+            float fine = fbm(fx * 52 + 7.3f, fy * 52 + 2.1f, 3, 52);
+            float v = 0.86f + 0.34f * (cell - 0.5f) + 0.20f * (fine - 0.5f);
+
+            /* Faculae — the bright network */
+            float fac = fbm(fx * 10 + 17.9f, fy * 10 + 4.3f, 4, 10);
+            if (fac > 0.60f) v += (fac - 0.60f) * 0.55f;
+
+            /* Spots, in two belts either side of the equator as they really
+             * are. 🚨 The darkening multiplies the finished colour rather than
+             * v — folded into v it only pulls the brightness down and the spot
+             * reads as a red hole instead of a dark one. */
+            float dark = 1.0f;
+            for (int i = 0; i < 7; i++) {
+                uint32_t h = hash2(i * 37, 991);
+                float sx  = (float)(h & 0xFFFF) / 65535.0f;
+                float sl  = ((i & 1) ? 1.0f : -1.0f) *
+                            (0.14f + 0.26f * (float)((h >> 16) & 0xFF) / 255.0f);
+                float rad = 0.019f + 0.022f * (float)((h >> 24) & 0xFF) / 255.0f;
+                float ddx = fx - sx;
+                if (ddx >  0.5f) ddx -= 1.0f;
+                if (ddx < -0.5f) ddx += 1.0f;
+                /* 🚨 The map is 512 wide and 256 tall while latitude spans 2,
+                 * so a degree of latitude covers four times the texture that a
+                 * degree of longitude does. Without this factor the spots come
+                 * out as flat ovals. */
+                float ddy = (lat - sl) * 0.25f;
+                float d = sqrtf(ddx * ddx + ddy * ddy);
+                if (d > rad * 2.1f) continue;
+                if (d < rad) {                           /* umbra */
+                    dark *= 0.16f + 0.16f * (d / rad);
+                } else {                                 /* penumbra, faded out */
+                    float t = (d - rad) / (rad * 1.1f);
+                    t = t * t * (3 - 2 * t);             /* soft, or the rim is a hard ring */
+                    dark *= 0.32f + 0.68f * t;
+                }
+            }
+
+            /* Hot where it is bright, dropping to a deep orange in the lanes
+             * — blue falls away fastest, which is what makes it read as heat
+             * rather than as a yellow ball. */
+            int r = (int)(252 * (0.55f + 0.45f * v) * dark);
+            int g = (int)(196 * v * v * dark);
+            int b = (int)( 96 * v * v * v * dark);
             s_tex_owned[y * TEX_W + x] = rgb565(r, g, b);
         }
     }
@@ -786,7 +915,17 @@ lv_timer_t *orb_start(lv_obj_t *root, orb_kind_t kind)
         return NULL;
     }
     memset(s_fb, 0, (size_t)466 * 466 * 2);
-    if (s_tex_bake) { if (kind == ORB_MOON) bake_moon(); else bake_earth(); }
+    /* 🚨 Every kind needs its own bake. This used to fall through to
+     * bake_earth() for anything that was not the Moon, so with no photograph
+     * baked in the Sun and Jupiter both came out as the Earth. */
+    if (s_tex_bake) {
+        switch (kind) {
+        case ORB_MOON:    bake_moon();    break;
+        case ORB_SUN:     bake_sun();     break;
+        case ORB_JUPITER: bake_jupiter(); break;
+        default:          bake_earth();   break;
+        }
+    }
 
     s_canvas = lv_canvas_create(root);
     lv_canvas_set_buffer(s_canvas, s_fb, 466, 466, LV_COLOR_FORMAT_RGB565);

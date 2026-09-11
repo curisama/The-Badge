@@ -1,5 +1,8 @@
 # Your WiFi credentials. Copy main/secrets.example.h over this and fill it in.
 main/secrets.h
+# The strings the typer app sends. Copy main/snippets.h.example over this.
+# 🚨 Whatever goes in here sits in the badge's flash as plain text.
+main/snippets.h
 
 # Build output and fetched dependencies
 build/
@@ -11,9 +14,11 @@ managed_components/
 # Simulator build output
 sim/badge_sim
 sim/badge_sim.exe
-sim/shots/
+# the simulator writes screenshots here (uncompressed, ~650 KB each)
+shots/
 sim/liblvgl.a
 sim/liblvgl.stamp
 sim/lvgl_obj/
 sim/badge_obj/
-main/snippets.h
+# LVGL fetched by tools/setup.sh --sim-only
+sim/lvgl/

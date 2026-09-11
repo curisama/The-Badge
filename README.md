@@ -6,6 +6,13 @@ Firmware for a round 466×466 AMOLED badge built on the Waveshare
 It is a thing you wear. It runs about a day on a charge, wakes to a clock, and
 does a handful of things well rather than many things badly.
 
+<p align="center">
+  <img src="docs/img/lock.png"  width="23%" alt="lock screen">
+  <img src="docs/img/home.png"  width="23%" alt="home">
+  <img src="docs/img/clock.png" width="23%" alt="clock">
+  <img src="docs/img/games.png" width="23%" alt="games">
+</p>
+
 | | |
 |---|---|
 | **Trackpad / Air Mouse** | Bluetooth HID. Use it as a touchpad, or point with it — the gyro drives the cursor |
@@ -57,7 +64,7 @@ was written and how it is tested.
 
 ```sh
 python3 sim/build.py
-./sim/badge_sim                 # writes screenshots to sim/shots/
+./sim/badge_sim                 # writes screenshots to shots/
 PORT=8792 python3 sim/server.py # then open http://localhost:8792
 ```
 
@@ -99,8 +106,9 @@ directly, that is a bug.
 tools/regress.sh
 ```
 
-It runs in a second and catches the things that have actually broken here
-before — not a test suite so much as a list of scars.
+It reads the sources, then drives the simulator for the few faults no pattern
+can catch. Half a minute, and it catches the things that have actually broken
+here before — not a test suite so much as a list of scars.
 
 ## License
 

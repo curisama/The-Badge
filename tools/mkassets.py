@@ -17,7 +17,7 @@ from PIL import Image, ImageDraw
 # not die whole.
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(REPO, "main", "assets")
-SHOTS = os.path.join(REPO, "sim", "shots")
+SHOTS = os.path.join(REPO, "shots")
 
 # The clock dial originals live outside this repo (from the watchface-s5 work).
 # Without them the clock assets are skipped.
@@ -260,7 +260,7 @@ def make_app_icons():
     emit("app_icon_meet", mt, "RGB565A8")
 
     # Water, moon, earth — the screen shrunk down. The same approach as the other icons.
-    # 🚨 The simulator screens have to be captured first: sim/shots/icon_{water,moon,earth}.png
+    # 🚨 The simulator screens have to be captured first: shots/icon_{water,moon,earth}.png
     for nm, crop in (("water", None), ("moon", None), ("earth", None)):
         f = os.path.join(SHOTS, f"icon_{nm}.png")
         if not os.path.exists(f):

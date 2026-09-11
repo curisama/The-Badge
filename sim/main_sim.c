@@ -125,7 +125,7 @@ static void advance(uint32_t us)
  * Windows has none of the three — no /tmp, no netpbm, no shell that knows
  * `mkdir -p`. So every screenshot came out 0 bytes while the program reported
  * success (09-09). Now it calls nothing outside and writes them itself. There
- * is no compression, so a shot is around 650 KB, but sim/shots is not in git
+ * is no compression, so a shot is around 650 KB, but shots/ is not in git
  * and it does not matter. */
 
 static uint32_t s_crc_tab[256];

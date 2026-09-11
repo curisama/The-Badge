@@ -261,7 +261,19 @@ if [ -f build/badge_fw.bin ] && [ ! -f build/.ninja_lock ]; then
 fi
 
 echo "════ the build list ════"
-grep -q 'fonts/badge_kr' main/CMakeLists.txt \
+# 🚨 sync_cmake.py rewrites main/CMakeLists.txt from a list of folders it holds
+#    internally, so a folder missing from that list is dropped silently and the
+#    link fails with `undefined reference` a long way from the cause. Every .c
+#    under main/ has to appear in the build list.
+python3 - <<'EOF' && ok "every source under main/ is in the build list" || bad "a source is missing from the build list"
+import os, sys
+lst = open("main/CMakeLists.txt", encoding="utf-8").read()
+missing = [os.path.relpath(os.path.join(r, f), "main").replace(os.sep, "/")
+           for r, _, fs in os.walk("main") for f in fs if f.endswith(".c")]
+missing = [m for m in missing if m not in lst]
+if missing:
+    print("  not in main/CMakeLists.txt:", " · ".join(sorted(missing))); sys.exit(1)
+EOF
 
 echo "════ timers (saving power once pinned the CPU) ════"
 if grep -rn 'lv_timer_set_period(t' main/apps/*.c >/dev/null 2>&1; then

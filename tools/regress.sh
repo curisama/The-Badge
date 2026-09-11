@@ -74,7 +74,7 @@ grep -q 'build_home();' main/launcher.c && grep -A6 's_swiped = true;' main/laun
   && ok "쪽이 바뀌면 홈을 새로 짓는다 (다시 띄우기만 하면 화면이 그대로다)" \
   || bad "쪽만 바꾸고 홈을 안 짓는다"
 
-grep -q 's_prev_p = -2;              /\* 새 라벨' main/launcher.c \
+grep -qE 's_prev_p = -2;' main/launcher.c \
   && ok "홈을 새로 지으면 배터리 숫자를 반드시 한 번 쓴다 (안 쓰면 LVGL 기본 글자 Text 가 남는다)" \
   || bad "새 홈에서 배터리 라벨이 기본 글자로 남을 수 있다"
 grep -B2 's_batt_timer = lv_timer_create' main/launcher.c | grep -q 'lv_timer_delete' \
@@ -141,7 +141,7 @@ echo "════ 마우스 상태 글자 ════"
 grep -A2 "s_state = lv_label_create" main/apps/app_mouse.c | grep -q "lv_label_set_text(s_state" \
   && ok "만들 때 글자를 넣는다" || bad "Text 가 남을 수 있다"
 # 🚨 들어갈 때 추적값을 되돌려야 첫 갱신이 반드시 쓴다
-grep -q "s_prev_conn = -1;                     /\* 다음 갱신이" main/apps/app_mouse.c \
+grep -qE 's_prev_conn = -1;' main/apps/app_mouse.c \
   && ok "앱에 들어갈 때 추적값을 되돌린다" || bad "지난 상태와 같으면 안 쓴다"
 
 echo "════ 접속정보 ════"
@@ -197,7 +197,7 @@ for m in re.finditer(r"\n(?:static )?\w[\w \*]*?(\w+)\([^)]*\)\s*\n?\{", src):
     body = src[start:i]
     # 예외는 이름이 아니라 **코드에 적힌 뜻**으로 둔다. 탭에서만 오는 자리는
     # 터치가 이미 조작으로 세어졌으므로 깨울 이유가 없다.
-    if "터치에서만 온다" in body: continue
+    if "only reached from a touch" in body: continue
     if "port_imu_accel(" in body and "tilt_is_input(" not in body:
         bad.append(name)
 if bad:
@@ -209,7 +209,9 @@ grep -q "lv_display_trigger_activity" main/apps/app_water.c \
 
 echo "════ 프레임 눈금 ════"
 # 🚨 계산 시간만 재면 반쪽이다 — 칠하기와 화면 보내기가 빠져 눈과 안 맞는다
-grep -q "진짜 간격" main/apps/app_water.c && grep -q "진짜 간격" main/apps/orb.c \
+# 문구가 아니라 **재는 행위**를 본다: 두 앱 다 프레임 사이 간격을 로그에 낸다
+grep -qE "real interval|진짜 간격" main/apps/app_water.c \
+  && grep -qE "real interval|진짜 간격" main/apps/orb.c \
   && ok "계산 시간과 진짜 간격을 같이 잰다" || bad "계산 시간만 재고 있다"
 
 echo "════ 천체 사진 ════"

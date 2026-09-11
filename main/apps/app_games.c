@@ -155,7 +155,8 @@ static bool consume_start_tap(void)
     ESP_LOGI("game", "start tap — timer armed (tilt mode=%d)", (int)s_tiltmode);
     if (s_ready_lbl) { lv_obj_delete(s_ready_lbl); s_ready_lbl = NULL; }
     /* Remember this attitude as level.
-     * Only reached from a touch, so the input is already counted — no wake needed. */
+     * This is only reached from a touch, so the input is already counted and
+     * there is nothing to wake. */
     if (!port_imu_accel(&s_g0x, &s_g0y)) { s_g0x = s_g0y = 0; }
     s_g0_set = true;
     s_loop = lv_timer_create(s_pending_cb, s_pending_ms, NULL);

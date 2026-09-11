@@ -13,8 +13,8 @@ static const int8_t INDEX[16] = {
     -1,-1,-1,-1,2,4,6,8, -1,-1,-1,-1,2,4,6,8,
 };
 
-/* 인코더 상태는 블록 사이에 이어진다. 블록 머리에 예측값과 인덱스를
- * 같이 적어두므로 디코더가 블록 하나만으로도 따라올 수 있다. */
+/* Encoder state carries across blocks. The predictor and index are written
+ * into each block header, so a decoder can follow from any single block. */
 static int32_t s_pred;
 static int8_t  s_index;
 
@@ -47,8 +47,8 @@ void adpcm_encode_block(const int16_t *pcm, int n, uint8_t out[ADPCM_BLOCK_BYTES
     memset(out, 0, ADPCM_BLOCK_BYTES);
     if (n <= 0) return;
 
-    /* 블록 머리 — 첫 샘플을 그대로 싣고 거기서 다시 시작한다.
-     * 이래야 앞 블록이 깨져도 뒤가 안 무너진다. */
+    /* The block header — the first sample goes in whole and everything
+     * restarts from it. That keeps a damaged block from taking the rest down. */
     s_pred = pcm[0];
     out[0] = (uint8_t)(s_pred & 0xFF);
     out[1] = (uint8_t)((s_pred >> 8) & 0xFF);
@@ -57,7 +57,7 @@ void adpcm_encode_block(const int16_t *pcm, int n, uint8_t out[ADPCM_BLOCK_BYTES
 
     for (int i = 1; i < ADPCM_BLOCK_SAMPLES; i++) {
         uint8_t c = encode_one(i < n ? pcm[i] : (int16_t)s_pred);
-        int pos = i - 1;                     /* 코드 순서: 낮은 니블 먼저 */
+        int pos = i - 1;                     /* code order: low nibble first */
         if (pos & 1) out[4 + pos / 2] |= (uint8_t)(c << 4);
         else         out[4 + pos / 2]  = c;
     }
@@ -75,16 +75,16 @@ size_t adpcm_wav_header(uint8_t *out, uint32_t data_bytes, uint32_t sample_rate)
     memcpy(out, "RIFF", 4);
     put32(out + 4, 4 + 8 + 20 + 8 + 4 + 8 + data_bytes);
     memcpy(out + 8, "WAVEfmt ", 8);
-    put32(out + 16, 20);                       /* fmt 길이 */
+    put32(out + 16, 20);                       /* fmt length */
     put16(out + 20, 0x0011);                   /* IMA ADPCM */
-    put16(out + 22, 1);                        /* 모노 */
+    put16(out + 22, 1);                        /* mono */
     put32(out + 24, sample_rate);
     put32(out + 28, bps);
-    put16(out + 32, ADPCM_BLOCK_BYTES);        /* 블록 정렬 */
-    put16(out + 34, 4);                        /* 샘플당 비트 */
+    put16(out + 32, ADPCM_BLOCK_BYTES);        /* block alignment */
+    put16(out + 34, 4);                        /* bits per sample */
     put16(out + 36, 2);                        /* cbSize */
     put16(out + 38, ADPCM_BLOCK_SAMPLES);
-    memcpy(out + 40, "fact", 4);               /* 압축 형식은 fact 가 있어야 안전하다 */
+    memcpy(out + 40, "fact", 4);               /* a compressed format is safer with a fact chunk */
     put32(out + 44, 4);
     put32(out + 48, samples);
     memcpy(out + 52, "data", 4);

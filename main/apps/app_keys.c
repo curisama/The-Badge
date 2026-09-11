@@ -1,17 +1,18 @@
-/* F키 다이얼.
+/* The F-key dial.
  *
- * 폰 소프트 키보드엔 F키가 없다. 그게 폰 RDP 로 엑셀 수식을 못 만지는
- * 진짜 이유다 — F4(절대참조 토글) 하나가 없어서 수식 체인을 못 짠다.
- * 원형 화면에 방사형으로 깔고 눌러서 쏜다.
+ * A phone's soft keyboard has no F keys. That is the real reason Excel
+ * formulas cannot be touched over RDP from a phone — without F4 (toggling
+ * absolute references) there is no building a formula chain. They are laid out
+ * radially on the round screen and fired on a press.
  *
- * 애플 터치바와 다른 점: 터치바는 있던 물리 F키를 뺏어서 욕먹었다.
- * 이건 원래 없던 걸 더한다. */
+ * Unlike Apple's Touch Bar: that took away physical F keys people already had,
+ * and was hated for it. This adds ones that were never there. */
 #include "app.h"
 #include "assets/assets.h"
 #include "port.h"
 #include <math.h>
 
-/* USB HID 키코드 */
+/* USB HID key codes */
 #define K_F1   0x3A
 #define K_F2   0x3B
 #define K_F4   0x3D
@@ -34,7 +35,7 @@ typedef struct {
     const char *hint;
 } key_t;
 
-/* 엑셀에서 손이 제일 자주 가는 것들. 순서는 화면 12시부터 시계방향. */
+/* The ones Excel reaches for most. The order runs clockwise from 12 o'clock. */
 static const key_t KEYS[] = {
     { "F4",  0,         K_F4,   "absolute ref" },
     { "F2",  0,         K_F2,   "edit cell" },
@@ -64,19 +65,21 @@ static void key_cb(lv_event_t *e)
 
 static void poll_cb(lv_timer_t *t)
 {
-    /* 🔋 화면이 꺼지면 아무도 안 본다. 다만 🚨 여기서 주기를 바꾸면 안 된다 —
-     * lv_timer_set_period() 는 안쪽에서 lv_timer_handler_resume() 을 불러서,
-     * 타이머 콜백에서 부르면 처리기가 그 자리에서 무한히 다시 돈다.
-     * (0909: 절전하려고 넣었다가 CPU 를 100% 물고 늘어지게 만들었다.
-     *  값이 같아도 마찬가지라 "바뀔 때만 세우기"로도 못 막는다.)
-     * 주기는 그대로 두고 4번에 한 번만 일한다. 효과는 같고 안전하다. */
+    /* 🔋 Screen off, nobody is looking. But 🚨 the period must not be changed
+     * here — lv_timer_set_period() calls lv_timer_handler_resume() internally,
+     * so calling it from a timer callback sends the handler round again on the
+     * spot, forever.
+     * (09-09: added to save power, and it pinned the CPU at 100%. Setting the
+     *  same value does it too, so "only set it when it changes" does not help.)
+     * The period stays as it is and the work happens on one tick in four. Same
+     * effect, and safe. */
     if (launcher_screen_is_off()) {
         static uint8_t skip;
         if (++skip % 4) return;
     }
 
-    /* 연결 상태가 그대로면 다시 그릴 게 없다. LVGL 은 값이 같아도
-     * 스타일을 세우면 무조건 무효화한다. */
+    /* Nothing to redraw while the connection state is unchanged. LVGL
+     * invalidates unconditionally when a style is set, same value or not. */
     static int s_prev = -1;
     int now = port_hid_connected() ? 1 : 0;
     if (now == s_prev) return;
@@ -88,7 +91,7 @@ static void poll_cb(lv_timer_t *t)
 
 static void fkeys_build(lv_obj_t *root)
 {
-    /* 12개를 30도 간격으로. 가운데는 비워서 뭘 눌렀는지 보여준다. */
+    /* Twelve of them, 30 degrees apart. The middle is left clear to show what was pressed. */
     for (unsigned i = 0; i < KEY_CNT; i++) {
         float ang = (float)(-M_PI / 2.0 + i * (2.0 * M_PI / KEY_CNT));
         int x = (int)(cosf(ang) * 168.f);
@@ -123,8 +126,8 @@ static void fkeys_build(lv_obj_t *root)
     poll_cb(NULL);
 }
 
-/* 셋 다 키보드를 쏘는 물건이라 한 앱으로 묶고 위아래로 넘긴다.
- * 홈에 아이콘을 세 개 두는 것보다 이쪽이 찾기 쉽다. */
+/* All three send keystrokes, so they are one app swiped vertically.
+ * Easier to find that way than three icons on the home screen. */
 void type_build(lv_obj_t *root);
 void present_build(lv_obj_t *root);
 void present_free(void);
@@ -152,7 +155,8 @@ static lv_color_t tint(void) { return lv_color_hex(0x8AB4F8); }
 
 const badge_app_t app_keys = {
     .name = "Keys", .art = &app_icon_keys, .icon = LV_SYMBOL_KEYBOARD, .tint = tint,
-    /* 화면을 보며 쓰는 앱이라 무한정 붙잡을 근거가 약하다. 30초 뒤 꺼져도
- * PWR 한 번이면 돌아온다 — 켬/끔 차이가 시간당 124mV 다. */
+    /* This app is used while looking at it, so there is little ground for
+     * holding the screen on indefinitely. Going dark after 30 seconds is one
+     * press of PWR away — on versus off is 124 mV an hour. */
     .radio = RADIO_BLE, .keep_awake = false, .enter = enter, .leave = leave,
 };

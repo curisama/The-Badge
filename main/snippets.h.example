@@ -1,12 +1,13 @@
-/* 이 파일을 snippets.h 로 복사해서 채운다. snippets.h 는 .gitignore 에 있다.
+/* Copy this file to snippets.h and fill it in. snippets.h is in .gitignore.
  *
- * 🚨 비밀번호를 넣으면 플래시에 평문으로 남는다. 배지를 잃어버리면 그대로 나간다.
- *    회사 계정이나 중요한 건 넣지 말 것. RDP 접속 계정처럼 "귀찮지만 덜 치명적인"
- *    것만 넣는 게 맞다. */
+ * 🚨 A password put in here sits in flash as plain text. Lose the badge and it
+ *    goes with it. Keep company accounts and anything important out. Something
+ *    like an RDP login — annoying to lose, but not fatal — is the right sort of
+ *    thing. */
 #pragma once
 
 #define BADGE_SNIPPETS \
     { "ID",    "myaccount" },      \
     { "PW",    "example-pass" },   \
     { "Mail",  "me@example.com" }, \
-    { "Sig",   "감사합니다" },
+    { "Sig",   "Thanks" },

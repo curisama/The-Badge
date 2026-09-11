@@ -1,14 +1,16 @@
 # Name,   Type, SubType, Offset,  Size, Flags
-# 32MB 플래시. storage 7M 은 아무도 안 쓰던 빈 땅이었고 뒤쪽 17M 은
-# 칸 자체가 없었다. 그 둘을 녹음 칸으로 돌린다.
-# factory 는 지금 앱이 3.6MB — 에셋이 계속 느니 6M 으로 여유를 둔다.
+# 32 MB flash. storage's 7 M was empty ground nobody used and the last 17 M had
+# no entry at all. Both are turned over to recordings.
+# factory: the app is 3.6 MB today — assets keep growing, so 6 M leaves room.
 nvs,      data, nvs,     0x9000,  0x6000,
 phy_init, data, phy,     0xf000,  0x1000,
 factory,  app,  factory, ,        6M,
 storage,  data, spiffs,  ,        1M,
-# 녹음 원본. 파일시스템 없이 순차로 쓴다 — 오디오는 append 뿐이라
-# FAT 을 얹어봐야 오버헤드만 는다. ADPCM 16kHz 기준 초당 8KB.
+# The recordings themselves, written sequentially with no filesystem — audio is
+# append-only, so a FAT on top would only add overhead. About 8 KB a second at
+# ADPCM 16 kHz.
 rec,      data, 0x40,    ,        24M,
-# 뻗었을 때 스택·레지스터를 통째로 여기 남긴다. idf.py coredump-info 로 읽는다.
-# 맨 뒤에 붙여야 앞 칸 오프셋이 안 밀린다 — nvs(설정/일지)와 rec(녹음)이 살아남는다.
+# On a crash the stack and registers are dumped here whole. Read with idf.py coredump-info.
+# It has to go last so the earlier offsets do not shift — nvs (settings/journal)
+# and rec (recordings) survive.
 coredump, data, coredump, ,       64K,

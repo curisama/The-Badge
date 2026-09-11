@@ -521,8 +521,8 @@ static esp_err_t start_bt_scan(uint32_t seconds)
  * BLE GAP
  * */
 extern void ble_hid_task_start_up(void);
-extern void badge_ble_passkey(uint32_t key);   /* 화면에 숫자 띄우기 (badge) */
-extern void badge_ble_bonded(esp_bd_addr_t addr);  /* 연결 간격 당기기 (badge) */
+extern void badge_ble_passkey(uint32_t key);   /* show the number on screen (badge) */
+extern void badge_ble_bonded(esp_bd_addr_t addr);  /* pull the connection interval in (badge) */
 static void ble_gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param)
 {
     switch (event) {
@@ -570,10 +570,11 @@ static void ble_gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_p
      * AUTHENTICATION
      * */
     case ESP_GAP_BLE_UPDATE_CONN_PARAMS_EVT:
-        /* 폰이 실제로 허락한 연결 간격. 마우스 리포트를 이보다 자주 쏴봐야
-         * 큐에 쌓이기만 하고 지연만 는다 — 여기 값에 맞춰 내보낸다. */
+        /* The connection interval the phone actually agreed to. Firing mouse
+         * reports faster than this only piles up the queue and adds latency —
+         * they go out at this rate. */
         badge_ble_set_interval(param->update_conn_params.conn_int);
-        ESP_LOGI(TAG, "연결 간격 확정: %.2fms (latency %d, timeout %dms)",
+        ESP_LOGI(TAG, "connection interval settled: %.2fms (latency %d, timeout %dms)",
                  param->update_conn_params.conn_int * 1.25f,
                  param->update_conn_params.latency,
                  param->update_conn_params.timeout * 10);
@@ -594,7 +595,7 @@ static void ble_gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_p
         ESP_LOGI(TAG, "BLE GAP KEY type = %s", esp_ble_key_type_str(param->ble_security.ble_key.key_type));
         break;
 
-    /* 짝짓기 숫자를 화면에 띄우려고 밖으로 넘긴다 (badge 추가분) */
+    /* Passed outward so the pairing number can be shown on screen (badge addition) */
     case ESP_GAP_BLE_PASSKEY_NOTIF_EVT: // ESP_IO_CAP_OUT
         // The app will receive this evt when the IO has Output capability and the peer device IO has Input capability.
         // Show the passkey number to the user to input it in the peer device.
@@ -672,27 +673,30 @@ esp_err_t esp_hid_ble_gap_adv_init(uint16_t appearance, const char *device_name)
 
     esp_err_t ret;
 
-    /* 🚨 광고 한 통은 31바이트뿐이다. 예제가 주던 대로 다 담으면 47바이트가
-     * 되어 넘친다 — 플래그3 + 송신출력3 + 연결간격6 + 겉모습4 +
-     * 128비트 UUID 18 + 이름 13. 넘치면 스택이 "Partial data write into ADV"
-     * 경고만 남기고 뒤를 버리는데, 뒤에 있는 게 하필 이름이라 폰에서
-     * 이름 없는 장치로 뜨거나 아예 안 잡힌다(0908 실기 확인).
+    /* 🚨 One advertising packet is only 31 bytes. Packing everything the
+     * example handed over comes to 47 and overflows — flags 3 + tx power 3 +
+     * connection interval 6 + appearance 4 + 128-bit UUID 18 + name 13. On
+     * overflow the stack leaves a "Partial data write into ADV" warning and
+     * drops the tail, and the tail happens to be the name, so the phone shows
+     * a nameless device or does not find it at all (confirmed on hardware 09-08).
      *
-     * HID 는 표준 서비스라 16비트(0x1812)로 알려도 똑같이 알아본다 — 18바이트가
-     * 4바이트가 된다. 이름은 스캔 응답으로 옮긴다. 폰은 광고를 보고 한 번 더
-     * 물어보므로 이름이 늦게 갈 뿐 다 보인다. */
-    /* 🚨 이 API 는 UUID 길이를 16의 배수로만 받는다. 2바이트(16비트)로 주면
-     * ESP_ERR_INVALID_ARG(258) 로 거절하고 광고가 아예 안 뜬다(0908 실기).
-     * 그래서 128비트 그대로 두고, 대신 이름을 스캔 응답으로 옮겨 자리를 만든다. */
+     * HID is a standard service, so announcing it as 16-bit (0x1812) is
+     * recognised just the same — 18 bytes become 4. The name moves to the scan
+     * response. The phone asks once more after seeing the advertisement, so
+     * the name simply arrives a little later and everything still shows. */
+    /* 🚨 This API only takes a UUID length that is a multiple of 16. Handing it
+     * 2 bytes (16-bit) is refused with ESP_ERR_INVALID_ARG(258) and nothing
+     * advertises at all (09-08 on the hardware). So the 128-bit form stays and
+     * the room is made by moving the name to the scan response instead. */
     const uint8_t hidd_service_uuid128[] = {
         0xfb, 0x34, 0x9b, 0x5f, 0x80, 0x00, 0x00, 0x80, 0x00, 0x10, 0x00, 0x00, 0x12, 0x18, 0x00, 0x00,
     };
 
     esp_ble_adv_data_t ble_adv_data = {
         .set_scan_rsp = false,
-        .include_name = false,          /* 이름은 스캔 응답으로 */
+        .include_name = false,          /* the name goes in the scan response */
         .include_txpower = false,
-        .min_interval = 0,              /* 연결간격 범위도 뺀다 — 6바이트 */
+        .min_interval = 0,              /* the interval range is left out too — 6 bytes */
         .max_interval = 0,
         .appearance = appearance,
         .manufacturer_len = 0,
@@ -703,12 +707,12 @@ esp_err_t esp_hid_ble_gap_adv_init(uint16_t appearance, const char *device_name)
         .p_service_uuid = (uint8_t *)hidd_service_uuid128,
         .flag = 0x6,
     };
-    /* 여기 담기는 것: 플래그3 + 겉모습4 + UUID18 = 25바이트 (한도 31) */
+    /* What fits here: flags 3 + appearance 4 + UUID 18 = 25 bytes (limit 31) */
 
     esp_ble_adv_data_t ble_scan_rsp = {
         .set_scan_rsp = true,
-        .include_name = true,           /* 이름 13바이트 — 따로 오니 안 잘린다 */
-        .include_txpower = true,        /* 3바이트. 스캔 응답도 31바이트 한도 */
+        .include_name = true,           /* name, 13 bytes — arriving separately, it is not cut */
+        .include_txpower = true,        /* 3 bytes. The scan response is also capped at 31 */
         .appearance = 0,
         .manufacturer_len = 0,
         .p_manufacturer_data = NULL,

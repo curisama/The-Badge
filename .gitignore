@@ -16,3 +16,4 @@ sim/liblvgl.a
 sim/liblvgl.stamp
 sim/lvgl_obj/
 sim/badge_obj/
+main/snippets.h

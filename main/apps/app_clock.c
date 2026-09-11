@@ -37,8 +37,8 @@ static void enter(lv_obj_t *root)
     lv_obj_set_style_bg_opa(tv, LV_OPA_TRANSP, 0);
     lv_obj_set_scrollbar_mode(tv, LV_SCROLLBAR_MODE_OFF);
 
-    /* 시계·타이머·스톱워치·알람은 다 "시간을 보는 물건" 이라 한 앱으로 묶는다.
-     * 위아래로 넘긴다 — 가운데 것들은 양쪽 다 열어둔다. */
+    /* Clock, timer, stopwatch and alarm are all "things for watching time", so
+     * they are one app. Swiped vertically — the middle ones open both ways. */
     face_build     (lv_tileview_add_tile(tv, 0, 0, LV_DIR_BOTTOM));
     timer_build    (lv_tileview_add_tile(tv, 0, 1, LV_DIR_TOP | LV_DIR_BOTTOM));
     stopwatch_build(lv_tileview_add_tile(tv, 0, 2, LV_DIR_TOP | LV_DIR_BOTTOM));

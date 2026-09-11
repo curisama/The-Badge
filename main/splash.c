@@ -1,5 +1,6 @@
-/* 부팅 화면. 켜자마자 아무것도 안 뜨면 켜진 건지 죽은 건지 알 수가 없다.
- * 1.2초 동안 이름과 링 하나를 보여주고 홈으로 넘긴다. */
+/* The boot screen. With nothing on screen at power-on there is no telling
+ * whether it came up or died. It shows the name and one ring for 1.2 seconds,
+ * then hands over to home. */
 #include "app.h"
 
 #define SPLASH_MS   1200
@@ -14,7 +15,7 @@ static void arc_cb(void *var, int32_t v)
 static void done_cb(lv_timer_t *t)
 {
     (void)t;
-    launcher_start();          /* 홈이 페이드로 올라오면서 스플래시를 지운다 */
+    launcher_start();          /* home fades up and wipes the splash away */
 }
 
 void splash_show(void)

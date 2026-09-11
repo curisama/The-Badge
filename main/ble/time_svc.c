@@ -1,17 +1,18 @@
-/* 시각 맞추기용 GATT 창구.
+/* The GATT window for setting the time.
  *
- * 와이파이 없는 데서도 폰으로 시계를 맞추려고 만들었다. BLE 표준의
- * Current Time Service 는 아이폰만 서버로 내주고 안드로이드는 안 준다.
- * 그래서 반대로 우리가 "여기에 시각을 써 넣어라"는 창구를 연다.
+ * Built so the clock can be set from a phone with no WiFi around. BLE's
+ * standard Current Time Service is only served by iPhones; Android does not
+ * offer it. So we do the opposite and open a window that says "write the time
+ * in here".
  *
- *   서비스   0000ba5e-...
- *   특성     0000ba71-...  쓰기 12바이트
- *            [0..7]  int64 리틀엔디안, 1970 기준 초 (UTC)
- *            [8..11] int32 리틀엔디안, 시간대 오프셋(분). 예: 서울 = 540
- *   8바이트만 써도 된다 — 그럼 시간대는 그대로 둔다.
+ *   service          0000ba5e-...
+ *   characteristic   0000ba71-...  12-byte write
+ *            [0..7]  int64 little-endian, seconds since 1970 (UTC)
+ *            [8..11] int32 little-endian, time-zone offset in minutes. Seoul = 540
+ *   Writing only 8 bytes is fine — the zone is then left as it was.
  *
- * Bluedroid 의 GATTS 콜백은 전역에 하나뿐이라, esp_hid 것과 우리 것을
- * 여기서 갈라 보낸다. 안 그러면 HID 서비스가 통째로 죽는다. */
+ * Bluedroid has exactly one global GATTS callback, so esp_hid's and ours are
+ * split apart here. Without that the HID service dies outright. */
 #include "port.h"
 #include "esp_gatts_api.h"
 #include "esp_hidd_gatts.h"
@@ -33,7 +34,7 @@ static const uint8_t CHR_UUID[16] = {
     0xfb, 0x34, 0x9b, 0x5f, 0x80, 0x00, 0x00, 0x80,
     0x00, 0x10, 0x00, 0x00, 0x71, 0xba, 0x00, 0x00,
 };
-/* 회의 제어 ba72. 배지가 notify 로 명령을 쏘고, 앱이 write 로 결과를 되쏜다. */
+/* Meeting control, ba72. The badge fires commands by notify and the app writes the result back. */
 static const uint8_t MEET_UUID[16] = {
     0xfb, 0x34, 0x9b, 0x5f, 0x80, 0x00, 0x00, 0x80,
     0x00, 0x10, 0x00, 0x00, 0x72, 0xba, 0x00, 0x00,
@@ -46,8 +47,8 @@ static uint16_t      s_meet_handle;
 static uint16_t      s_meet_cccd;
 static uint16_t      s_conn_id;
 static bool          s_connected;
-static bool          s_subscribed;   /* 앱이 notify 를 켰나 */
-static uint8_t       s_ack;          /* 앱이 보낸 마지막 회신. 0 = 없음 */
+static bool          s_subscribed;   /* has the app turned notify on? */
+static uint8_t       s_ack;          /* the last reply from the app. 0 = none */
 
 static void apply_time(const uint8_t *v, int len)
 {
@@ -55,8 +56,8 @@ static void apply_time(const uint8_t *v, int len)
 
     int64_t secs = 0;
     memcpy(&secs, v, 8);
-    if (secs < 1700000000LL) {            /* 2023 년보다 이르면 쓰레기 */
-        ESP_LOGW(TAG, "말도 안 되는 시각 %lld — 무시", (long long)secs);
+    if (secs < 1700000000LL) {            /* anything before 2023 is rubbish */
+        ESP_LOGW(TAG, "nonsensical time %lld — ignored", (long long)secs);
         return;
     }
     struct timeval tv = { .tv_sec = (time_t)secs };
@@ -71,7 +72,7 @@ static void apply_time(const uint8_t *v, int len)
     time_t now = time(NULL);
     struct tm tm;
     localtime_r(&now, &tm);
-    ESP_LOGI(TAG, "시각 맞춤: %04d-%02d-%02d %02d:%02d (UTC%+d분)",
+    ESP_LOGI(TAG, "clock set: %04d-%02d-%02d %02d:%02d (UTC%+d min)",
              tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
              tm.tm_hour, tm.tm_min, port_get_tz_offset());
 }
@@ -102,11 +103,11 @@ static void time_gatts(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
         break;
     }
     case ESP_GATTS_ADD_CHAR_EVT: {
-        /* 특성을 한 번에 둘 못 만든다. 시각 것이 끝나면 회의 것을 잇는다. */
+        /* Two characteristics cannot be created at once. The meeting one follows the time one. */
         esp_bt_uuid_t u = p->add_char.char_uuid;
         if (u.len == ESP_UUID_LEN_128 && memcmp(u.uuid.uuid128, CHR_UUID, 16) == 0) {
             s_chr_handle = p->add_char.attr_handle;
-            ESP_LOGI(TAG, "시각 창구 열림 (handle %d)", s_chr_handle);
+            ESP_LOGI(TAG, "time window open (handle %d)", s_chr_handle);
 
             esp_bt_uuid_t mu = { .len = ESP_UUID_LEN_128 };
             memcpy(mu.uuid.uuid128, MEET_UUID, 16);
@@ -118,7 +119,7 @@ static void time_gatts(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
                                    NULL, NULL);
         } else {
             s_meet_handle = p->add_char.attr_handle;
-            /* notify 를 켜고 끄는 스위치(CCCD). 이게 없으면 앱이 구독을 못 한다. */
+            /* The switch that turns notify on and off (CCCD). Without it the app cannot subscribe. */
             esp_bt_uuid_t du = { .len = ESP_UUID_LEN_16,
                                  .uuid = { .uuid16 = ESP_GATT_UUID_CHAR_CLIENT_CONFIG } };
             esp_ble_gatts_add_char_descr(s_svc_handle, &du,
@@ -130,7 +131,7 @@ static void time_gatts(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
 
     case ESP_GATTS_ADD_CHAR_DESCR_EVT:
         s_meet_cccd = p->add_char_descr.attr_handle;
-        ESP_LOGI(TAG, "회의 창구 열림 (handle %d, cccd %d)", s_meet_handle, s_meet_cccd);
+        ESP_LOGI(TAG, "meeting window open (handle %d, cccd %d)", s_meet_handle, s_meet_cccd);
         break;
 
     case ESP_GATTS_CONNECT_EVT:
@@ -148,10 +149,10 @@ static void time_gatts(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
             apply_time(p->write.value, p->write.len);
         } else if (p->write.handle == s_meet_cccd && p->write.len >= 2) {
             s_subscribed = (p->write.value[0] & 0x01) != 0;
-            ESP_LOGI(TAG, "회의 구독 %s", s_subscribed ? "켬" : "끔");
+            ESP_LOGI(TAG, "meeting subscription %s", s_subscribed ? "on" : "off");
         } else if (p->write.handle == s_meet_handle && p->write.len >= 1) {
             s_ack = p->write.value[0];
-            ESP_LOGI(TAG, "앱 회신 0x%02X", s_ack);
+            ESP_LOGI(TAG, "app replied 0x%02X", s_ack);
         }
         if (p->write.need_rsp) {
             esp_ble_gatts_send_response(gatts_if, p->write.conn_id,
@@ -164,7 +165,7 @@ static void time_gatts(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
     }
 }
 
-/* Bluedroid 는 GATTS 콜백을 하나만 받는다. HID 것과 우리 것을 갈라 보낸다. */
+/* Bluedroid takes only one GATTS callback. HID's and ours are split apart here. */
 static void gatts_router(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
                          esp_ble_gatts_cb_param_t *p)
 {
@@ -189,7 +190,7 @@ esp_err_t time_svc_register(void)
 }
 
 
-/* ── 회의 버튼 창구 ───────────────────────────────────────── */
+/* ── the meeting button window ────────────────────────────── */
 
 bool port_meet_link(void)
 {
@@ -202,10 +203,10 @@ bool port_meet_send(uint8_t cmd)
     esp_err_t r = esp_ble_gatts_send_indicate(s_if, s_conn_id, s_meet_handle,
                                               1, &cmd, false /* notify */);
     if (r != ESP_OK) {
-        ESP_LOGW(TAG, "명령 0x%02X 못 보냄 (%s)", cmd, esp_err_to_name(r));
+        ESP_LOGW(TAG, "command 0x%02X not sent (%s)", cmd, esp_err_to_name(r));
         return false;
     }
-    ESP_LOGI(TAG, "명령 0x%02X 보냄", cmd);
+    ESP_LOGI(TAG, "command 0x%02X sent", cmd);
     return true;
 }
 

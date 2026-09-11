@@ -1,7 +1,9 @@
-/* 문자열 타이핑기. 배지가 키보드인 척하고 대신 쳐준다.
- * 폰 소프트 키보드로 RDP 로그인 창에 긴 비밀번호를 치는 게 고통이라 만들었다.
+/* The string typer. The badge pretends to be a keyboard and types for you.
+ * Built because typing a long password into an RDP login box with a phone's
+ * soft keyboard is agony.
  *
- * 내용은 main/snippets.h 에 있고 .gitignore 로 빠져 있다. 없으면 예시가 뜬다. */
+ * The content lives in main/snippets.h, which is excluded by .gitignore.
+ * Without it, examples are shown. */
 #include "app.h"
 #include "assets/assets.h"
 #include "port.h"
@@ -16,9 +18,10 @@ static const snip_t SNIPS[] = {
 #ifdef BADGE_SNIPPETS
     BADGE_SNIPPETS
 #else
-    /* 🚨 이 라벨은 Montserrat 로 찍힌다 — 한글을 넣으면 깨진다.
-     * (BADGE_SNIPPETS 로 넣는 문구도 마찬가지다. 한글을 쓰려면
-     *  tools/make-kr-font.sh 에 그 글자를 넣고 폰트를 바꿔야 한다.) */
+    /* 🚨 This label is rendered in Montserrat — Korean in it comes out broken.
+     * (The same goes for text put in through BADGE_SNIPPETS. Using Korean
+     *  means adding those characters in tools/make-kr-font.sh and swapping the
+     *  font.) */
     { "no snippets", "" },
 #endif
 };
@@ -42,7 +45,7 @@ void type_build(lv_obj_t *root)
     lv_obj_set_style_text_color(t, lv_color_hex(0x8A8A90), 0);
     lv_obj_align(t, LV_ALIGN_CENTER, 0, -160);
 
-    /* 한 줄에 하나씩 큼직하게. 잘못 누르면 엉뚱한 게 타이핑되니 작으면 안 된다. */
+    /* One per line, good and large. Pressing the wrong one types the wrong thing, so small is not an option. */
     int n = SNIP_CNT > 4 ? 4 : SNIP_CNT;
     for (int i = 0; i < n; i++) {
         lv_obj_t *b = lv_button_create(root);

@@ -1,5 +1,5 @@
-/* 발표 리모컨. 슬라이드 넘기고, 잠깐 화면을 검게 만든다.
- * 단추가 커야 한다 — 발표 중엔 화면을 안 보고 누른다. */
+/* The presentation remote. Turn the slide, and black the screen for a moment.
+ * The buttons have to be large — during a talk they are pressed without looking. */
 #include "app.h"
 #include "assets/assets.h"
 #include "port.h"
@@ -47,12 +47,12 @@ static const pkey_t QUIT  = { "", 0, K_ESC,  "esc" };
 
 void present_build(lv_obj_t *root)
 {
-    /* 다음 슬라이드가 제일 많이 눌린다. 화면 절반을 준다. */
+    /* Next slide is pressed most. It gets half the screen. */
     btn(root, LV_SYMBOL_RIGHT, 210, 150, 0, -92, 0x2E6E9E, &NEXT,  &lv_font_montserrat_48);
     btn(root, LV_SYMBOL_LEFT,  210,  90, 0,  22, 0x24242A, &PREV,  &lv_font_montserrat_32);
     btn(root, "B",              96,  72, -78, 118, 0x24242A, &BLACK, &lv_font_montserrat_26);
     btn(root, "F5",             96,  72,  78, 118, 0x24242A, &START, &lv_font_montserrat_26);
-    /* 아래쪽은 홈 손잡이 자리다. Esc 는 위로 올린다. */
+    /* The bottom is where the home handle lives. Esc moves up. */
     btn(root, "Esc",           110,  52,   0, -176, 0x1C1C22, &QUIT,  &lv_font_montserrat_20);
 
     s_state = lv_label_create(root);

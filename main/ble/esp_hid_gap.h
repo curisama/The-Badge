@@ -85,5 +85,5 @@ esp_err_t esp_hid_ble_gap_adv_start(void);
 
 #endif /* _ESP_HIDH_GAP_H_ */
 
-/* 폰이 허락한 실제 연결 간격을 hid_mouse.c 에 알려준다(1.25ms 단위). */
+/* Tells hid_mouse.c the connection interval the phone agreed to (in 1.25 ms units). */
 void badge_ble_set_interval(uint16_t units);

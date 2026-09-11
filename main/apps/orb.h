@@ -1,4 +1,4 @@
-/* 달·지구 — 손가락으로 돌리는 구. Games 안의 한 판. */
+/* Moon and Earth — a sphere turned with a finger. One of the boards in Games. */
 #pragma once
 #include "lvgl.h"
 
@@ -7,8 +7,8 @@ extern const char *const ORB_NAME[ORB_N];
 
 lv_timer_t *orb_start(lv_obj_t *root, orb_kind_t kind);
 void        orb_stop(void);
-/* 검증용 — 지금 경도(0~1)와 프레임 하나 그리는 데 걸린 마이크로초 */
+/* For checking — the current longitude (0..1) and the microseconds one frame took */
 void        orb_debug(float *lon, uint32_t *render_us);
-void        orb_set_tilt_deg(float deg);   /* 검증용 */
-void        orb_set_lon(float lon);        /* 검증용 */
-void        orb_set_lean_deg(float deg);   /* 검증용 */
+void        orb_set_tilt_deg(float deg);   /* for checking */
+void        orb_set_lon(float lon);        /* for checking */
+void        orb_set_lean_deg(float deg);   /* for checking */

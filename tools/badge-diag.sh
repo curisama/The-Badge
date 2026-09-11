@@ -1,18 +1,19 @@
 #!/bin/bash
-# 배지가 왜 재부팅됐는지 한 번에 뽑는다.
+# Pulls out in one go why the badge rebooted.
 #
-#   ./tools/badge-diag.sh          기록 읽기 (아무것도 안 지운다)
-#   ./tools/badge-diag.sh --clear  기록 비우기 (사람이 명시적으로 할 때만)
+#   ./tools/badge-diag.sh          read the record (erases nothing)
+#   ./tools/badge-diag.sh --clear  empty the record (only when a person asks for it)
 #
-# 🚨 기록은 스스로 절대 안 지워진다. 읽으려면 꽂아야 하는데 꽂는 순간
-#    지워지면 아무 소용이 없다(0906 에 배터리 일지를 그렇게 날렸다).
+# 🚨 The record never erases itself. Reading it means plugging in, and erasing
+#    on plug-in would make it useless (that is how the battery journal was lost
+#    on 09-06).
 set -u
 cd "$(dirname "$0")/.."
 PORT=${PORT:-/dev/ttyACM0}
 
-# 🚨 윈도우의 COMx 는 파일이 아니다. [ -e COM6 ] 은 배지가 꽂혀 있어도
-#    늘 거짓이라, 여기서 "보드가 안 보인다" 며 끝나 버렸다(0909).
-#    COMx 면 존재 검사를 건너뛰고 파이썬이 열어보며 판단하게 둔다.
+# 🚨 Windows' COMx is not a file. [ -e COM6 ] is always false even with the badge
+#    plugged in, so this used to stop here saying "no board found" (09-09).
+#    For a COMx the existence check is skipped and Python decides by opening it.
 port_missing() {
     case "$1" in
         COM[0-9]*|com[0-9]*) return 1 ;;
@@ -21,19 +22,19 @@ port_missing() {
 }
 
 if port_missing "$PORT"; then
-    echo "✗ 보드가 안 보인다 ($PORT)"
-    echo "  윈도우:  PORT=COM6 ./tools/badge-diag.sh   (장치관리자에서 번호 확인)"
+    echo "✗ no board found ($PORT)"
+    echo "  Windows:  PORT=COM6 ./tools/badge-diag.sh   (check the number in Device Manager)"
     echo "  WSL   :  usbipd attach --wsl --busid 1-1"
     exit 1
 fi
 
-echo "════════ 1. 부팅 기록 (리셋 사유 · 가동시간 · 하던 일) ════════"
+echo "════════ 1. boot record (reset reason · uptime · what it was doing) ════════"
 timeout 25 python3 - "$PORT" <<'PYEOF'
 import serial, sys, time
 s = serial.Serial(sys.argv[1], 115200, timeout=1)
 s.setDTR(False); s.setRTS(True); time.sleep(0.1); s.setRTS(False)
 end = time.time() + 15
-# 태그로 거른다. 문구를 바꿔도 안 새게.
+# Filtered by tag, so changing the wording does not leak.
 TAGS = (') rst:', ') badge:', ') batt:', 'rst:0x', 'Light sleep')
 while time.time() < end:
     t = s.readline().decode('utf-8', 'replace').rstrip()
@@ -42,22 +43,22 @@ while time.time() < end:
 PYEOF
 
 echo
-echo "════════ 2. 코어덤프 (패닉이면 죽은 자리가 나온다) ════════"
+echo "════════ 2. core dump (a panic names where it died) ════════"
 if [ ! -f build/badge_fw.elf ]; then
-    echo "  (build/badge_fw.elf 없음 — idf.py build 먼저)"
+    echo "  (no build/badge_fw.elf — run idf.py build first)"
 elif ! command -v idf.py >/dev/null 2>&1; then
-    echo "  (IDF 환경 아님 —  . ~/esp/esp-idf/export.sh  먼저)"
+    echo "  (not an IDF environment —  . ~/esp/esp-idf/export.sh  first)"
 else
     OUT=$(idf.py -p "$PORT" coredump-info 2>&1)
-    # 빈 파티션은 0xff 로 차 있어서 "version 0xffff is not supported" 로 나온다
+    # An empty partition is full of 0xff, which comes out as "version 0xffff is not supported"
     if echo "$OUT" | grep -qiE 'No core dump|not found|is empty|0xffff\" is not supported|Incorrect size of core dump'; then
-        echo "  덤프 없음 = 패닉으로 죽은 적은 없다"
-        echo "  → 부팅 기록이 브라운아웃[9]/전원글리치[14]면 전원 문제,"
-        echo "    워치독[5~7]이면 어딘가 CPU 를 안 놓은 것이다"
+        echo "  no dump = it has never died in a panic"
+        echo "  → if the boot record says brownout[9]/power glitch[14], it is a power problem;"
+        echo "    watchdog[5~7] means something never let the CPU go"
     else
         HIT=$(echo "$OUT" | grep -A40 -iE 'crashed task|PC:|backtrace|panic|Exception' | head -50)
         if [ -n "$HIT" ]; then echo "$HIT"; else
-            echo "  덤프를 읽었지만 익숙한 항목이 없다. 전체 출력:"
+            echo "  the dump was read but nothing familiar is in it. Full output:"
             echo "$OUT" | tail -25
         fi
     fi
@@ -65,16 +66,16 @@ fi
 
 if [ "${1:-}" = "--clear" ]; then
     echo
-    echo "════════ 기록 비우기 ════════"
+    echo "════════ emptying the record ════════"
     idf.py -p "$PORT" coredump-erase 2>&1 | tail -2
-    echo "  ※ 부팅 기록(NVS)은 다음 12번까지 자동으로 밀려나므로 그대로 둔다"
+    echo "  ※ the boot record (NVS) rolls over by itself after twelve, so it is left alone"
 fi
 
 echo
-echo "════════ 읽는 법 ════════"
+echo "════════ how to read this ════════"
 cat <<'HELP'
-  '화면켬' 에서 패닉/워치독이 반복  → 깨우는 경로가 범인
-  브라운아웃[9] · 전원글리치[14]    → 전압 문제 (배터리 잔량 같이 볼 것)
-  직전 가동시간이 늘 짧다           → 부팅 직후 죽는 것
-  코어덤프가 있다                   → 그게 정답이다. 파일·줄까지 나온다
+  panics/watchdogs repeating at 'screen on'  → the wake path is the culprit
+  brownout[9] · power glitch[14]             → a voltage problem (check the battery level too)
+  the previous uptime is always short        → it is dying right after boot
+  there is a core dump                       → that is the answer. It names the file and line
 HELP

@@ -1,11 +1,12 @@
-/* "녹음 내보내기" 화면.
+/* The "export recordings" screen.
  *
- * 🚨 이 화면이 켜져 있는 동안 배지의 USB-C 는 COM 이 아니다. 그래서 **여기가
- * 모드를 바꾸는 유일한 문**이고, 나가는 길이 늘 보여야 한다. 실수로 들어와서
- * 못 나오면 굽지도 못하는 물건이 된다.
+ * 🚨 While this is up, the badge's USB-C is not a serial port. That makes
+ * this the only door that changes the mode, and the way out has to stay
+ * visible — walking in here by accident and not finding the exit leaves you
+ * with something you cannot even reflash.
  *
- * 🚨 "끝" 은 재부팅이다(usb_msc.c 의 설명). 사람에게도 그렇게 적는다 —
- * 아무 말 없이 꺼졌다 켜지면 고장난 줄 안다. */
+ * 🚨 Done means reboot (see usb_msc.c). Say so on screen: a device that
+ * blinks off and back on without warning reads as broken. */
 #include "app.h"
 #include "port.h"
 #include "usb_export.h"
@@ -32,8 +33,9 @@ static void paint(void)
         return;
     }
 
-    /* 켜진 뒤로는 배지가 드라이브다. 호스트가 실제로 붙었는지까지 보여준다 —
-     * "켰는데 안 보인다" 가 케이블 문제인지 배지 문제인지 갈린다. */
+    /* Once it is up the badge is a drive. Show whether a host actually
+     * attached, so "I turned it on and nothing appeared" separates a cable
+     * problem from a badge problem. */
     if (usb_msc_ejected()) {
         lv_label_set_text(s_big, LV_SYMBOL_OK);
         lv_label_set_text(s_sub, "ejected");
@@ -58,8 +60,8 @@ static void paint(void)
 static void tick(lv_timer_t *t)
 {
     (void)t;
-    /* 호스트가 안전 제거를 하면 그 자리에서 COM 으로 되돌린다 —
-     * 사람이 다시 배지를 만질 필요가 없다. */
+    /* If the host ejects it properly, switch back to serial right there —
+     * no reason to make anyone touch the badge again. */
     if (usb_msc_active() && usb_msc_ejected()) { paint(); usb_msc_stop(); return; }
     paint();
 }
@@ -67,7 +69,7 @@ static void tick(lv_timer_t *t)
 static void tap_cb(lv_event_t *e)
 {
     (void)e;
-    if (usb_msc_active()) { usb_msc_stop(); return; }   /* 끝 — 재부팅한다 */
+    if (usb_msc_active()) { usb_msc_stop(); return; }   /* done — this reboots */
     if (usb_export_files() <= 0) return;
     if (!usb_msc_start()) lv_label_set_text(s_note, "could not switch to USB");
     paint();
@@ -75,8 +77,8 @@ static void tap_cb(lv_event_t *e)
 
 static void usb_screen_close(void)
 {
-    /* 🚨 드라이브로 올라간 뒤엔 못 빠져나간다 — 나가려면 모드를 되돌려야
-     * 하고 그건 재부팅이다. 문을 잠그는 대신 그 일을 대신 해준다. */
+    /* 🚨 No way out once the drive is up: leaving means changing the mode
+     * back, and that means rebooting. Rather than lock the door, do it. */
     if (usb_msc_active()) { usb_msc_stop(); return; }
     if (s_tick) { lv_timer_delete(s_tick); s_tick = NULL; }
     launcher_keep_awake(false);
@@ -87,7 +89,7 @@ static void usb_screen_close(void)
 void usb_screen_open(void)
 {
     if (s_scr) return;
-    usb_export_build();              /* 지금 있는 녹음으로 판을 짜 둔다 */
+    usb_export_build();              /* lay out the volume from what is stored */
 
     s_scr = lv_obj_create(lv_layer_top());
     lv_obj_remove_style_all(s_scr);
@@ -129,8 +131,9 @@ void usb_screen_open(void)
 
     ui_back_btn(s_scr, usb_screen_close);
     launcher_handle_add(s_scr, usb_screen_close);
-    /* 🚨 내보내는 동안 화면이 꺼지면 안 된다. 꺼진 화면에서는 "끝" 을 누를
-     * 길이 없고, 그 상태로 케이블을 뽑으면 윈도우가 짖는다. */
+    /* 🚨 The display must not sleep mid-export. There is no way to press done
+     * on a dark screen, and pulling the cable in that state makes Windows
+     * complain. */
     launcher_keep_awake(true);
     s_tick = lv_timer_create(tick, 400, NULL);
     paint();

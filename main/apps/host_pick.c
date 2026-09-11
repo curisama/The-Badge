@@ -1,14 +1,14 @@
-/* 붙은 적 있는 호스트를 골라 옮겨 붙는다.
+/* Pick which host to be connected to.
  *
- * 🚨 BLE 본딩은 **주소만** 저장한다. 호스트 이름은 안 온다 — 배지가 주변장치
- * 쪽이라 상대 이름을 볼 일이 없다. 그래서 목록을 만들면 `A4:83:E7:11:22:33`
- * 같은 게 세 줄 뜨고 어느 게 집 PC 인지 알 수가 없다. **키패드가 생겨서**
- * 사람이 이름을 지어 붙일 수 있게 됐고, 그래서 이 화면이 쓸모가 생겼다.
+ * 🚨 A BLE bond stores the address and nothing else. The host's name never
+ * arrives — the badge is the peripheral, so it has no reason to see one. A
+ * list built from bonds alone is three rows of `A4:83:E7:11:22:33` with no
+ * way to tell which one is the PC at home. This screen only became worth
+ * having once there was a keypad to name them with.
  *
- * 🚨 제일 까다로운 건 이전 호스트의 재연결 경합이다. 화이트리스트만으로는
- * 스택 구현에 따라 새므로, 붙는 순간 주소를 보고 아니면 끊는 방어가
- * hid_mouse.c 쪽에 하나 더 있다.
- */
+ * 🚨 The awkward part is the old host racing to reconnect. A whitelist alone
+ * leaks depending on the stack, so hid_mouse.c has a second guard that checks
+ * the address on connect and drops it if it is the wrong one. */
 #include "app.h"
 #include "port.h"
 #include <stdio.h>
@@ -19,19 +19,22 @@ static lv_timer_t *s_poll;
 static hid_host_t  s_hosts[HID_HOSTS_MAX];
 static int         s_n;
 static int         s_editing = -1;
-static bool        s_built;            /* s_hosts 가 지금 그려진 것과 같나 */
+static bool        s_built;            /* does s_hosts match what is drawn? */
 
 static void show_list(void);
 
-/* 🚨 **누르고 있는 동안 화면을 다시 지으면 그 누름은 죽는다.**
- * LVGL 은 눌린 객체가 지워지면 `lv_indev_wait_release()` 를 불러 **손을 뗄
- * 때까지 그 입력장치를 아예 무시한다**(lv_obj_tree.c). 새 객체가 같은 자리에
- * 생겨도 PRESSED 가 다시 안 간다. 그래서 길게 누르기가 영영 안 걸린다 —
- * 더 오래 눌러도 소용없다. 0911 제보: "길게 눌러도 키보드 안 나와".
+/* 🚨 **Rebuilding the screen under a finger kills that press.**
  *
- * 이 화면만 2초마다 목록을 통째로 다시 짓고 있었다. 두 겹으로 막는다:
- *   1. 값이 안 바뀌었으면 다시 짓지 않는다 (평소엔 아예 안 짓는다)
- *   2. 바뀌었어도 손이 닿아 있으면 미룬다 */
+ * When the object being pressed is deleted, LVGL calls
+ * `lv_indev_wait_release()` and ignores that input device until the finger
+ * lifts (lv_obj_tree.c). A new object in the same place gets no PRESSED, so a
+ * long press never completes — pressing harder or longer does nothing.
+ * Reported as "holding it doesn't bring up the keyboard".
+ *
+ * This was the only screen rebuilding its whole list every two seconds. Two
+ * guards now:
+ *   1. if nothing changed, do not rebuild (normally: never)
+ *   2. if something did change but a finger is down, wait */
 static bool touching(void)
 {
     for (lv_indev_t *i = lv_indev_get_next(NULL); i; i = lv_indev_get_next(i))
@@ -56,7 +59,7 @@ static void relist_cb(lv_timer_t *t)
     hid_host_t now[HID_HOSTS_MAX];
     int n = port_hid_hosts(now, HID_HOSTS_MAX);
     if (same_as_drawn(now, n)) return;
-    if (touching()) return;            /* 다음 차례에 다시 본다 */
+    if (touching()) return;            /* look again next time round */
     show_list();
 }
 
@@ -66,7 +69,7 @@ static void addr_txt(const uint8_t a[6], char *out, size_t cap)
              a[0], a[1], a[2], a[3], a[4], a[5]);
 }
 
-/* 이름을 다 치면 */
+/* Name entered */
 static void name_done(const char *text)
 {
     if (text && s_editing >= 0 && s_editing < s_n)
@@ -75,7 +78,7 @@ static void name_done(const char *text)
     show_list();
 }
 
-/* 짧게 = 그 기기로 옮겨 붙기 */
+/* Tap = switch to that host */
 static void pick_cb(lv_event_t *e)
 {
     int i = (int)(intptr_t)lv_event_get_user_data(e);
@@ -84,9 +87,9 @@ static void pick_cb(lv_event_t *e)
     show_list();
 }
 
-/* 이름 짓기 — 길게 누르기로도, 줄 오른쪽 연필 단추로도.
- * 🚨 길게 누르기만 두면 아는 사람만 쓴다. 보이는 문이 하나 있어야 한다
- * (뒤로가기 단추를 넣을 때와 같은 이유). */
+/* Renaming, by holding the row or by the pencil at the end of it.
+ * 🚨 Hold-only means only people who already know about it can rename
+ * anything — the same reason the back button exists. */
 static void rename_cb(lv_event_t *e)
 {
     int i = (int)(intptr_t)lv_event_get_user_data(e);
@@ -131,7 +134,7 @@ static void show_list(void)
         lv_obj_add_event_cb(b, pick_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
         lv_obj_add_event_cb(b, rename_cb, LV_EVENT_LONG_PRESSED, (void *)(intptr_t)i);
 
-        /* 연필 — 줄 안에 겹쳐 둔다. 여기를 누르면 줄이 아니라 이게 받는다. */
+        /* The pencil sits inside the row. Touches here go to it, not the row. */
         lv_obj_t *ed = lv_button_create(b);
         lv_obj_set_size(ed, 54, 46);
         lv_obj_set_style_radius(ed, 14, 0);
@@ -145,7 +148,7 @@ static void show_list(void)
         lv_obj_center(el);
 
         lv_obj_t *t = lv_label_create(b);
-        /* 🚨 이름이 없으면 주소를 보인다. 빈 줄을 보이면 고를 수가 없다. */
+        /* 🚨 Unnamed hosts show their address. A blank row cannot be chosen. */
         lv_label_set_text(t, s_hosts[i].name[0] ? s_hosts[i].name : sub);
         lv_obj_set_style_text_font(t, &lv_font_montserrat_18, 0);
         lv_obj_set_style_text_color(t, lv_color_hex(0xE8ECF0), 0);
@@ -164,7 +167,7 @@ static void show_list(void)
         lv_obj_set_style_text_font(e, &lv_font_montserrat_16, 0);
         lv_obj_set_style_text_color(e, lv_color_hex(0x6E7686), 0);
     } else {
-        /* 골라둔 것을 풀어 아무나 받게 — 새 기기에 짝지을 때 필요하다. */
+        /* Release the pinned host so anything can pair — needed for a new device. */
         lv_obj_t *b = lv_button_create(s_list);
         lv_obj_set_size(b, 340, 54);
         lv_obj_set_style_radius(b, 16, 0);
@@ -180,10 +183,10 @@ static void show_list(void)
 
     s_built = true;
 
-    /* 붙는 데 몇 초 걸린다. 상태가 바뀌면 목록이 따라가야 한다.
-     * 🚨 lv_timer_cb_t 는 인자를 받는다. show_list 를 그대로 캐스팅해 넘기면
-     * 형이 안 맞는 호출이라 플랫폼에 따라 터진다 — 감싸서 넘긴다.
-     * 🚨 이 콜백은 **바뀌었을 때만** 다시 짓는다(relist_cb 의 설명). */
+    /* Connecting takes a few seconds, and the list should follow along.
+     * 🚨 lv_timer_cb_t takes an argument. Casting show_list to it is a
+     * mismatched call that breaks on some platforms — wrap it instead.
+     * 🚨 This only rebuilds when something actually changed (see relist_cb). */
     s_poll = lv_timer_create(relist_cb, 2000, NULL);
 }
 

@@ -1,9 +1,11 @@
-/* 게임 셋. 다마고치(에뮬레이터)를 걷어내고 그 자리에 넣었다.
- * 셋 다 도형 몇 개만 움직이므로 CPU 도 메모리도 거의 안 쓴다.
+/* The games. All of them move a handful of shapes, so none of them cost much
+ * CPU or memory.
  *
- *   회전 피하기 — 벽이 조여온다. 원형 화면이 곧 게임판
- *   벽돌깨기   — 링 패들과 원을 따라 깔린 벽돌. 네모 화면으론 못 만드는 모양
- *   구슬 미로  — 기울여서 굴린다. 놀고 있던 IMU 를 쓴다 */
+ *   brick breaker — a ring paddle and bricks laid round the circle; a shape
+ *                   a rectangular screen cannot make
+ *   pinball       — the round screen is the table
+ *   marble maze   — tilt to roll it, which puts the idle IMU to work
+ *   bubble wrap   — pop them, they come back */
 #include "app.h"
 #include "assets/assets.h"
 #include "port.h"
@@ -25,84 +27,90 @@
 #  include "esp_log.h"
 #endif
 
-/* 벽돌 개수는 clear_board 가 배열을 훑어야 해서 여기서 먼저 정한다. */
-#define BRK_ROWS   4            /* 단계마다 3 또는 4 줄을 쓴다 */
-/* 🚨 기체가 없으면 한 번 놓칠 때마다 그 판을 처음부터 다시 쌓는다. 5단계를
- * 거의 다 깨놓고 한 번 놓쳐서 통째로 잃으면 다시 할 마음이 안 든다
- * (0911 제보: "다 깼는데 죽었더니 완전 새로 시작해서 열받더라").
- * 셋을 준다 — 두 번은 봐주고 세 번째에 끝난다. */
+/* clear_board walks these arrays, so the counts have to be settled here. */
+#define BRK_ROWS   4            /* a level uses three rows or four */
+/* 🚨 Without spare balls, one miss rebuilds the level from scratch. Getting
+ * most of the way through five levels and losing all of it to a single miss
+ * is where people put the badge down — reported as "cleared it, died, started
+ * completely over, furious".
+ * Three balls: two mistakes forgiven, the third ends it. */
 #define BRK_LIVES  3
-#define BRK_MAX    9            /* 한 줄 최대 개수 */
+#define BRK_MAX    9            /* most bricks in one row */
 #define BRK_N      (BRK_ROWS * BRK_MAX)
 
-/* 구슬게임 기준 자세. 탭해서 시작한 순간의 기울기를 0으로 잡는다 —
- * 손목에 차고 있든 책상에 눕혀 있든 "지금 이 자세가 수평"이 되어야
- * 어느 자세에서 시작해도 같은 감각으로 굴릴 수 있다. */
+/* Reference attitude for the tilt games. The tilt at the moment you tap to
+ * start becomes level, so whether the badge is on your wrist or flat on a
+ * desk, "this is horizontal" means the same thing and it rolls the same way. */
 static float s_g0x, s_g0y;
 static bool  s_g0_set;
 
-static lv_obj_t   *s_root;      /* 게임이 그려지는 판 */
-/* 판 위의 것들. clear_board 가 한꺼번에 끊어야 해서 여기 모아둔다. */
+static lv_obj_t   *s_root;      /* the board everything is drawn on */
+/* Things on the board. clear_board has to drop them all at once, so they live together. */
 static lv_obj_t   *s_paddle, *s_ball;
-/* 기울기 모드 — 배지를 기울여 판을 몬다. 같은 버튼으로 껐다 켠다. */
+/* Tilt mode — steer by tilting the badge. Same button toggles it. */
 static bool      s_tiltmode;
 static lv_obj_t *s_tilt_btn, *s_tilt_lbl;
-static float     s_tilt0;        /* 켤 때의 자세를 가운데로 삼는다 */
+static float     s_tilt0;        /* the attitude at switch-on becomes centre */
 static bool      s_tilt0_set;
 static lv_obj_t   *s_brick[BRK_N];
 static bool        s_alive[BRK_N];
-static uint8_t     s_hp[BRK_N];      /* 남은 맷집. 2 면 한 번 더 맞아야 깨진다 */
-/* 방해물 — 가운데를 도는 구슬 둘.
- * 🚨 호(lv_arc)로 만들지 마라. 각도를 바꿀 때마다 LVGL 이 그 객체의 **네모
- * 전체**를 무효화한다. 반지름 124 짜리 호면 262x262 = 68,000 픽셀을 매 걸음
- * 다시 밀게 되고 그것만으로 프레임이 반토막 난다. 작은 구슬을 옮기면
- * 무효화되는 건 옛 자리와 새 자리 두 조각뿐이다 — 공이랑 똑같다. */
+static uint8_t     s_hp[BRK_N];      /* hits left; 2 means it takes another one */
+/* The obstacle: two beads orbiting the middle.
+ * 🚨 Do not build this out of an arc. Changing an arc's angle makes LVGL
+ * invalidate the object's whole bounding box — at radius 124 that is
+ * 262x262 = 68,000 pixels pushed every step, which halves the frame rate on
+ * its own. Moving a small bead invalidates the old spot and the new one, and
+ * nothing else. Same cost as the ball. */
 #define OBS_N     2
-#define OBS_R     124.0f        /* 도는 반지름 */
-#define OBS_D     26            /* 지름(px) */
+#define OBS_R     124.0f        /* orbit radius */
+#define OBS_D     26            /* diameter, px */
 static lv_obj_t *s_obs[OBS_N];
 static float     s_obs_ang, s_obs_dps;
 
-#define PB_WALL     206.0f   /* 공 중심이 여기까지 나간다 */
-#define PB_BR       6.5f     /* 공 반지름 */
-#define PB_GRAV     0.085f   /* 걸음(20ms)당 아래로 붙는 속도 (기본 경사) */
-/* 기울기 1g(=1000) 가 기본 경사보다 조금 더 미는 정도. 세워 들면 둘이 더해져
- * 두 배 남짓 빨라진다 — 세운 만큼 가팔라지는 게 맞다. */
+#define PB_WALL     206.0f   /* how far out the ball's centre may go */
+#define PB_BR       6.5f     /* ball radius */
+#define PB_GRAV     0.085f   /* downward pull per 20 ms step — the table's slope */
+/* Tilting a full 1 g (=1000) pushes slightly harder than the built-in slope,
+ * so holding the badge upright adds the two together and roughly doubles the
+ * speed. Steeper when you stand it up is the right behaviour. */
 #define PB_TILT     0.00011f
 #define PB_DAMP     0.996f
-#define PB_WALL_E   0.84f    /* 벽은 조금 먹는다 */
+#define PB_WALL_E   0.84f    /* the wall takes a little off */
 #define PB_MAXV     14.0f
 #define PB_BUMP_N   5
 #define PB_BUMP_R   21.0f
-/* 쓰러뜨리는 표적 — 맞으면 사라지고 다 쓰러뜨리면 한꺼번에 다시 선다.
- * 🚨 범퍼만 있으면 공이 어디로 가든 점수가 같아서 겨눌 이유가 없다.
- * "다음에 뭘 노릴까" 가 생겨야 판이 넓게 쓰인다. */
+/* Drop targets: knocked flat when hit, and all of them stand back up together.
+ * 🚨 With only bumpers, every direction scores the same and there is nothing
+ * to aim at. The board only gets used widely once there is a "what do I go
+ * for next". */
 #define PB_TGT_N    4
 #define PB_TGT_R    9.0f
-#define PB_BUMP_E   1.30f    /* 범퍼는 때려서 보낸다 */
+#define PB_BUMP_E   1.30f    /* bumpers kick the ball away */
 #define PB_FLIP_L   104.0f
 #define PB_FLIP_W   14.0f
-#define PB_FLIP_STEP 15.0f   /* 걸음당 도는 각(도) */
-#define PB_DRAIN_X  44.0f    /* 이 폭 안으로 내려가면 빠진다 */
-/* 🚨 날개 축은 **벽에 붙여야** 한다. 처음엔 CX±76 에 뒀는데 그 높이의 벽이
- * CX±141 이라 바깥에 65px 짜리 통로가 생겼고, 공이 날개를 거들떠보지도 않고
- * 그리로 흘러내렸다. 축을 원 위에 얹으면 바깥길이 아예 없어진다.
- * sqrt(206^2 - 150^2) = 141.2 — 축 높이에서 원이 여기까지 벌어져 있다. */
+#define PB_FLIP_STEP 15.0f   /* degrees swept per step */
+#define PB_DRAIN_X  44.0f    /* fall through a gap this wide and it is lost */
+/* 🚨 The flipper pivots have to sit **on the wall**. They started at CX±76,
+ * but the wall at that height is at CX±141, which left a 65 px lane outside
+ * them — and the ball simply ran down it, ignoring the flippers entirely.
+ * Putting the pivots on the circle removes the lane.
+ * sqrt(206^2 - 150^2) = 141.2, which is how wide the circle is there. */
 #define PB_RING_W   6
-/* 안쪽 면이 공이 닿는 자리에 오게 = (PB_WALL + PB_BR + 선굵기) * 2 */
+/* Inner face lands where the ball touches = (PB_WALL + PB_BR + width) * 2 */
 #define PB_RING_D   ((int)((PB_WALL + PB_BR + PB_RING_W) * 2.0f))
-/* 🚨 한 걸음(20ms)을 셋으로 쪼갠다. 날개는 걸음당 15도씩 도는데 끝이
- * 피벗에서 104px 이라 한 걸음에 27px 을 쓸고 지나간다 — 공(지름 13)보다
- * 크다. 끝 각도로만 판정하면 **올린 날개가 공을 뚫고 지나가** 아무 일도
- * 안 일어난다. 그게 "판정이 이상하다" 의 정체다. 쪼개면 9px 씩이라 닿는다. */
+/* 🚨 Each 20 ms step is done in three. A flipper turns 15 degrees per step
+ * and its tip is 104 px from the pivot, so it sweeps 27 px in one — wider
+ * than the ball (13 across). Testing only the end angle lets a raised
+ * flipper pass straight through the ball and nothing happens at all. That is
+ * what "the hit detection is off" was. In thirds it moves 9 px and connects. */
 #define PB_SUB      3
 #define PB_FLIP_PX  141.0f
 #define PB_FLIP_PY  150.0f
 #define PB_BALLS    3
 
 typedef struct {
-    float px, py;            /* 축 */
-    float rest, up;          /* 쉴 때 · 올렸을 때 각(도, y 아래가 양수) */
+    float px, py;            /* pivot */
+    float rest, up;          /* resting and raised angle (degrees, +y is down) */
     float ang;
     bool  on;
 } pb_flip_t;
@@ -116,7 +124,7 @@ static int   s_pb_pts, s_pb_left;
 static uint32_t s_pb_last, s_pb_acc;
 static float s_pb_bx[PB_BUMP_N], s_pb_by[PB_BUMP_N];
 static float s_pb_tx[PB_TGT_N], s_pb_ty[PB_TGT_N];
-static bool  s_pb_tup[PB_TGT_N];          /* 아직 서 있나 */
+static bool  s_pb_tup[PB_TGT_N];          /* still standing? */
 static lv_obj_t *s_pb_tgt[PB_TGT_N];
 static int         s_brick_n, s_left_cnt;
 static lv_timer_t *s_loop;
@@ -124,7 +132,7 @@ static lv_obj_t   *s_score;
 
 static void show_menu(void);
 
-/* 화면이 뜨자마자 시작하면 준비가 안 된 채로 죽는다. 첫 탭을 기다린다. */
+/* Starting the instant the screen appears means dying before you are ready. Wait for a tap. */
 static lv_timer_cb_t s_pending_cb;
 static uint32_t      s_pending_ms;
 static lv_obj_t     *s_ready_lbl;
@@ -140,14 +148,14 @@ static void arm_start(lv_timer_cb_t cb, uint32_t ms)
     lv_obj_align(s_ready_lbl, LV_ALIGN_CENTER, 0, 128);
 }
 
-/* 첫 탭이면 시작만 하고 그 입력은 게임에 넘기지 않는다 */
+/* On the first tap, start the game and do not pass that touch on to it */
 static bool consume_start_tap(void)
 {
     if (!s_pending_cb) return false;
-    ESP_LOGI("game", "시작 탭 — 타이머 세움 (기울기모드=%d)", (int)s_tiltmode);
+    ESP_LOGI("game", "start tap — timer armed (tilt mode=%d)", (int)s_tiltmode);
     if (s_ready_lbl) { lv_obj_delete(s_ready_lbl); s_ready_lbl = NULL; }
-    /* 지금 자세를 수평으로 기억한다.
-     * 터치에서만 온다 — 조작은 이미 세어졌다(깨울 필요가 없다) */
+    /* Remember this attitude as level.
+     * Only reached from a touch, so the input is already counted — no wake needed. */
     if (!port_imu_accel(&s_g0x, &s_g0y)) { s_g0x = s_g0y = 0; }
     s_g0_set = true;
     s_loop = lv_timer_create(s_pending_cb, s_pending_ms, NULL);
@@ -155,7 +163,7 @@ static bool consume_start_tap(void)
     return true;
 }
 
-/* ── 공통 ────────────────────────────────────────────────────── */
+/* ── shared ──────────────────────────────────────────────────── */
 
 static void stop_loop(void)
 {
@@ -163,15 +171,15 @@ static void stop_loop(void)
 }
 
 #define POP_MAX  32
-#define POP_D    78            /* 방울 지름 — 손끝보다 커야 만지는 맛이 난다 */
-#define POP_R    178           /* 방울 중심이 이 안에 있으면 깐다 */
+#define POP_D    78            /* bubble diameter — bigger than a fingertip or it is no fun */
+#define POP_R    178           /* bubbles whose centre is inside this get popped */
 
 static lv_obj_t *s_pop[POP_MAX];
 static uint8_t   s_popped[POP_MAX];
 static int       s_pop_n, s_pop_left;
 static uint32_t  s_pop_seed = 2463534242u;
 static lv_obj_t *s_pop_lbl;
-static int       s_refill_in;  /* 0 이상이면 그만큼 뒤에 다시 채운다 */
+static int       s_refill_in;  /* if >= 0, refill after this many ticks */
 
 void pop_start(void);
 static void do_orb(void);
@@ -195,13 +203,13 @@ static void clear_board(void)
     s_pop_lbl = NULL;
     for (int i = 0; i < POP_MAX; i++) s_pop[i] = NULL;
     lv_obj_clean(s_root);
-    /* 지운 객체를 가리키던 것들을 전부 끊는다. 안 끊으면 다음 판을 세우기
-     * 전에 누가 건드릴 때 해제된 메모리를 밟는다. */
+    /* Drop every pointer into what was just deleted. Leave one and the next
+     * thing that touches it walks into freed memory before the next board is up. */
     s_score   = NULL;
     s_paddle  = NULL;
     s_tilt_btn = NULL;
     s_tilt_lbl = NULL;
-    s_tiltmode = true;   /* 기본은 기울기 */
+    s_tiltmode = true;   /* tilt is the default */
     s_ball    = NULL;
     s_brick_n = 0;
     s_left_cnt = 0;
@@ -213,14 +221,17 @@ static void clear_board(void)
     for (int i = 0; i < PB_BUMP_N; i++) s_pb_bump[i] = NULL;
 }
 
-/* ── 화면 갈아엎기는 이벤트 밖에서 ────────────────────────────
- * 메뉴 버튼과 뒤로 버튼은 s_root 의 자식이다. 그 버튼의 이벤트 안에서
- * lv_obj_clean(s_root) 을 부르면 "지금 처리 중인 그 버튼"이 해제되고,
- * LVGL 이 돌아와 이미 없는 객체를 밟는다. 게임 한두 판 만에 뻗던 원인.
- * 그래서 실제 전환은 1ms 짜리 일회용 타이머로 이벤트 밖에 내보낸다. */
-/* 🚨 예전엔 port_tone_enable(true) 만 부르고 끄는 데가 없었다. 벽돌 하나를
- * 깬 순간부터 코덱이 열린 채 사각파가 계속 나갔다 — 게임 내내 스피커·I2S·
- * 앰프가 구동된다. 의도는 "톡" 한 번이었다. 일회용 타이머로 끊는다. */
+/* ── rebuild screens outside the event ────────────────────────
+ * The menu and back buttons are children of s_root. Calling
+ * lv_obj_clean(s_root) from inside one of their events frees the very button
+ * being handled, and LVGL returns to an object that no longer exists — which
+ * is what crashed after a game or two. So the actual switch goes out through
+ * a one-shot 1 ms timer, outside the event.
+ *
+ * 🚨 port_tone_enable(true) used to be called with nothing ever calling
+ * false. From the first brick onward the codec stayed open and a square wave
+ * kept going out — speaker, I2S and amplifier driven for the whole game, when
+ * the intent was a single tick. A one-shot timer stops it. */
 static void tone_off_cb(lv_timer_t *t)
 {
     (void)t;
@@ -247,7 +258,7 @@ static void defer_cb(lv_timer_t *t)
 
 static void defer(void (*fn)(void))
 {
-    if (s_defer_fn) return;          /* 연타로 두 번 들어오는 걸 막는다 */
+    if (s_defer_fn) return;          /* stop a double tap queueing two */
     s_defer_fn = fn;
     lv_timer_t *t = lv_timer_create(defer_cb, 1, NULL);
     lv_timer_set_repeat_count(t, 1);
@@ -256,15 +267,15 @@ static void defer(void (*fn)(void))
 static void do_back(void)
 {
     clear_board();
-    launcher_handle_show(true);      /* 메뉴에선 손잡이를 되돌린다 */
+    launcher_handle_show(true);      /* the menu gets the handle back */
     show_menu();
 }
 
 static void orb_menu(void);
 
-/* 🚨 천체의 뒤로가기가 게임 메뉴로 나갔다(0911 지적). 같은 판(app_games.c)을
- * 세 앱이 나눠 쓰는 탓인데, 뒤로가기는 **판이 아니라 들어온 문**을 따라가야
- * 한다. 그래서 돌아갈 데를 단추에 들려 보낸다. */
+/* 🚨 Back out of the planets and you ended up in the games menu. Three apps
+ * share this file, but back should follow **the door you came in by**, not
+ * the file. So the destination is handed to the button. */
 static void do_orb_back(void)
 {
     clear_board();
@@ -278,12 +289,13 @@ static void back_cb(lv_event_t *e)
     defer(dest ? dest : do_back);
 }
 
-/* 🚨 자리를 판마다 고른다. 기본은 맨 위 바깥쪽(-74,-196)인데, **벽을 그린
- * 판(벽돌·핀볼)에서는 그 자리가 벽 위에 걸친다**(0911 지적: "벽이랑 벽돌,
- * 그리고 버튼"). 벽은 판정이 걸린 물건이라 비켜줄 수 없으니 단추가 안으로
- * 들어온다. 64x34 짜리가 반지름 R 안에 다 들어오려면
+/* 🚨 Each board picks its own spot. The default is outside at the top
+ * (-74,-196), but on the boards that draw a wall (bricks, pinball) that lands
+ * on the wall itself — reported as "the wall, the bricks and the button".
+ * The wall has collision on it and cannot move, so the button comes inward.
+ * A 64x34 button fits inside radius R when
  *     (|dx|+32)^2 + (|dy|+17)^2 <= R^2
- * 여야 한다. 벽돌 벽이 제일 좁아서(206) 거기에 맞춘 (∓40, -174) 를 쓴다. */
+ * and the brick wall is the tightest at 206, so (∓40, -174) is what both use. */
 #define GBTN_IN_DX   40
 #define GBTN_IN_DY  (-174)
 
@@ -304,15 +316,15 @@ static void add_back_xy(void (*dest)(void), int dx, int dy)
 static void add_back_to(void (*dest)(void)) { add_back_xy(dest, -74, -196); }
 static void add_back(void) { add_back_to(do_back); }
 
-/* ── 기울기 모드 ─────────────────────────────────────────────
- * 판을 손으로 돌리는 대신 배지를 기울여 굴린다. 스트랩에 끼워 손목에
- * 차고 있으면 이쪽이 훨씬 낫다 — 화면을 손가락이 안 가린다.
- * 같은 버튼을 다시 누르면 터치로 돌아온다. */
+/* ── tilt mode ───────────────────────────────────────────────
+ * Instead of dragging the paddle, tilt the badge and let it roll. On a strap
+ * around your wrist this is much better — your finger is not on the screen.
+ * The same button switches back to touch. */
 static void tilt_paint(void)
 {
     if (!s_tilt_btn) return;
-    /* 기본이 기울기다. 버튼은 "손으로 돌리기" 로 되돌리는 문이라,
-     * 켜져 있을 때가 아니라 꺼져 있을 때(=터치 모드) 를 표시한다. */
+    /* Tilt is the default, so the button is the way back to dragging. It
+     * shows the state it turns on (touch), not the one that is active. */
     lv_obj_set_style_bg_color(s_tilt_btn,
         lv_color_hex(s_tiltmode ? 0x24242A : 0x2E6E5A), 0);
     if (s_tilt_lbl) {
@@ -326,14 +338,14 @@ static void tilt_cb(lv_event_t *e)
 {
     (void)e;
     s_tiltmode = !s_tiltmode;
-    s_tilt0_set = false;          /* 켤 때의 자세를 새로 잡는다 */
+    s_tilt0_set = false;          /* take a fresh reference attitude */
     tilt_paint();
 }
 
 static void add_tilt_btn_xy(int dx, int dy)
 {
-    /* 🚨 기본을 기울기로 둔다. 스트랩에 끼워 손목에 차고 하는 물건이라
-     * 손가락으로 판을 돌리면 화면을 제 손이 가린다. */
+    /* 🚨 Default to tilt. This is worn on a strap, and dragging the paddle
+     * means covering the screen with your own hand. */
     s_tiltmode = true;
     s_tilt0_set = false;
     s_tilt_btn = lv_button_create(s_root);
@@ -373,62 +385,67 @@ static lv_obj_t *make_score(void)
     return l;
 }
 
-/* ── 벽돌깨기 ────────────────────────────────────────────────
- * 벽돌은 위쪽에 무더기로, 내 판은 아래쪽 호를 따라서만 움직인다.
- * 판은 다이얼처럼 돌린 만큼 움직이고, 아래 반원 밖으로는 못 나간다. */
+/* ── brick breaker ───────────────────────────────────────────
+ * Bricks sit in a block at the top; the paddle runs along the bottom arc
+ * only. It turns like a dial and cannot leave the lower half. */
 
-/* 벽돌은 네모로, 위쪽에 줄지어 놓는다. 줄마다 원이 허락하는 폭을 꽉 채우되
- * 벽돌 자체는 직선이다. 판정도 네모라 단순하다. */
+/* The bricks are rectangles in rows. Each row is as wide as the circle allows,
+ * but the bricks themselves are straight, so the collision test is a box. */
 #define BRK_H      26
-#define BRK_TOP    80           /* 첫 줄 y — 위쪽 단추(y 42~76) 아래 */
+#define BRK_TOP    80           /* first row's y — below the buttons (y 42..76) */
 #define BRK_GAP    4
 #define PADDLE_R   198.0f
 #define PAD_HALF   26.0f
 #define PAD_MIN    128.0f
 #define PAD_MAX    232.0f
 #define BALL_R     8.0f
-/* 벽·판의 **안쪽 면**이 공이 닿는 자리(PADDLE_R + BALL_R = 206)에 오게.
- * lv_arc 의 안쪽 면 = 크기/2 - 선굵기. */
+/* Put the **inner face** of the wall and paddle where the ball touches
+ * (PADDLE_R + BALL_R = 206). For lv_arc that face is size/2 - line width. */
 #define BRK_WALL_W 4
 #define BRK_PAD_W  16
 #define BRK_WALL_D ((int)((PADDLE_R + BALL_R + BRK_WALL_W) * 2.0f))
-/* 벽돌이 들어갈 수 있는 반지름. 벽 안쪽 면(206)에서 4px 물러선다 —
- * 🚨 딱 붙이면 그림이 닿아 보이고, 공이 벽과 벽돌을 **같은 걸음에** 건드릴
- * 여지가 생긴다. 그때 판정이 두 번 뒤집혀 엉뚱한 데로 튄다. */
+/* How far out bricks may go: 4 px in from the wall's inner face (206).
+ * 🚨 Flush against it looks like contact, and it lets the ball touch a brick
+ * and the wall **in the same step** — two reflections that cancel and send it
+ * somewhere impossible. */
 #define BRK_FIT    (PADDLE_R + BALL_R - 4.0f)
 #define BRK_PAD_D  ((int)((PADDLE_R + BALL_R + BRK_PAD_W) * 2.0f))
-/* 프레임당 이동량(20ms 주기 = 50fps). 5.0 이면 초당 250px 쯤 —
- * 25ms/4.5 이던 예전보다 약 40% 빠르다. */
-static uint32_t s_brk_last, s_brk_acc;   /* 흐른 시간을 모아 걸음 수로 바꾼다 */
-#define BALL_RAMP  1.015f       /* 판에 맞을 때마다 조금씩 */
+/* Pixels per step (20 ms period = 50 fps). 5.0 is about 250 px/s, roughly 40%
+ * quicker than the 4.5-per-25 ms it used to be. */
+static uint32_t s_brk_last, s_brk_acc;   /* banked time, spent as whole steps */
+#define BALL_RAMP  1.015f       /* a little faster on every paddle hit */
 
-/* ── 다섯 단계 ────────────────────────────────────────────────
- * 🚨 **속도 하나로 어렵게 만들지 않는다.** 물리는 빠른 공을 견딘다 — 벽돌이
- * 26px 두께라 한 걸음에 42px 이상 가야 뚫리고, 판은 반지름으로 잡아 통과
- * 자체가 불가능하고, 걸음이 시간 기준이라 프레임이 밀려도 안 뚫린다.
- * 못 버티는 건 **사람 손목**이다. 위에서 판까지 5.0 이면 1.6초, 12 면
- * 0.66초인데 조작이 터치가 아니라 기울기라 손목을 실제로 돌려야 하고 판은
- * 아래쪽 104도 안에서만 움직인다. 0.66초는 어려운 게 아니라 운이 된다.
- * 그래서 속도는 9.0 까지만 쓰고 나머지를 네 손잡이로 나눠 올린다.
+/* ── five levels ──────────────────────────────────────────────
+ * 🚨 **Speed alone is not the difficulty.** The physics takes a fast ball
+ * fine: bricks are 26 px thick, so tunnelling needs 42 px in one step; the
+ * paddle is tested by radius, so passing through it is not possible at all;
+ * and steps are timed, so a late frame does not skip one either.
+ * What cannot take it is **a wrist**. Top to paddle is 1.6 s at 5.0 and 0.66 s
+ * at 12, and this is steered by tilt, not touch — you have to physically turn
+ * your wrist, and the paddle only travels 104 degrees. At 0.66 s it stops
+ * being hard and becomes luck. So speed tops out at 9.0 and the other four
+ * dials carry the rest.
  *
- * 🚨 시작 속도와 상한을 **둘 다** 정해야 한다. 공은 판에 맞을 때마다
- * 1.5%씩 빨라지다 상한에서 멈춘다(BALL_RAMP). 상한만 올리면 단계마다 초반이
- * 똑같고, 시작만 올리면 몇 번 튀자마자 상한에 붙어 차이가 안 난다. */
+ * 🚨 Set **both** the starting speed and the cap. The ball gains 1.5% on each
+ * paddle hit until it reaches the cap (BALL_RAMP). Raise only the cap and
+ * every level opens identically; raise only the start and it pins to the cap
+ * after a few bounces and the levels feel the same anyway. */
 #define BRK_LEVELS 5
 typedef struct {
-    float   spd0, spdmax;   /* 시작 속도 · 상한 (걸음당 px) */
-    float   pad_half;       /* 판 반각(도). 줄이면 판이 짧아진다 */
-    uint8_t rows;           /* 벽돌 줄 수 (3 또는 4) */
-    uint8_t pattern;        /* 벽돌 배치 0=꽉 1=체크 2=가운데빔 */
-    uint8_t tough_rows;     /* 위에서 이만큼 줄은 두 번 맞아야 깨진다 */
-    float   obs_dps;        /* 도는 방해물 각속도(걸음당 도). 0 이면 없다 */
+    float   spd0, spdmax;   /* starting speed and cap, px per step */
+    float   pad_half;       /* paddle half-angle; smaller is a shorter paddle */
+    uint8_t rows;           /* rows of bricks (3 or 4) */
+    uint8_t pattern;        /* 0 = full, 1 = checker, 2 = gap in the middle */
+    uint8_t tough_rows;     /* this many rows from the top take two hits */
+    float   obs_dps;        /* obstacle speed, degrees per step; 0 = none */
 } brk_level_t;
 
-/* 🚨 뒷단계가 앞단계보다 **빨리 끝나면** 안 된다. 배치를 성기게 하는 것만으로
- * 난이도를 올리면 벽돌이 줄어 판이 짧아진다(첫 판에서 L4 가 8개, L1 이
- * 17개였다 — 거꾸로였다). 성기게 만드는 단계엔 줄을 하나 더 준다. */
+/* 🚨 A later level must not **finish sooner** than an earlier one. Thinning
+ * the layout to raise difficulty also removes bricks and shortens the round —
+ * the first cut had L4 at 8 bricks against L1's 17, which is backwards. Levels
+ * that thin out get an extra row. */
 static const brk_level_t BRK_LV[BRK_LEVELS] = {
-    /* 시작  상한   판반각 줄 배치 단단 방해물 */
+    /* start  cap   half  rows pattern tough obstacle */
     { 5.0f, 6.5f, 26.0f, 3, 0, 0, 0.0f },
     { 5.4f, 7.0f, 24.0f, 4, 0, 1, 0.0f },
     { 5.8f, 7.5f, 22.0f, 4, 1, 2, 1.2f },
@@ -436,7 +453,7 @@ static const brk_level_t BRK_LV[BRK_LEVELS] = {
     { 7.0f, 9.0f, 18.0f, 4, 0, 2, 2.6f },
 };
 static int   s_level;                    /* 0..4 */
-static float s_pad_half = 26.0f;         /* 지금 단계의 판 반각 */
+static float s_pad_half = 26.0f;         /* this level's paddle half-angle */
 static float s_spd0, s_spdmax;
 
 
@@ -444,21 +461,21 @@ static float s_spd0, s_spdmax;
 
 static lv_area_t s_brect[BRK_N];
 static float     s_bx, s_by, s_vx, s_vy, s_pad_ang;
-static float     s_spd;   /* 지금 목표 속도. 판에 맞을 때마다 조금씩 는다 */
+static float     s_spd;   /* target speed now; creeps up on each paddle hit */
 
 static void paddle_draw(void)
 {
-    /* LVGL 호는 3시가 0도. 우리 각도는 12시 기준이라 90 을 뺀다. */
+    /* LVGL arcs put 0 degrees at 3 o'clock; ours is from 12, hence the -90. */
     float g = s_pad_ang - 90.0f;
     if (g < 0) g += 360.0f;
     lv_arc_set_bg_angles(s_paddle, (int32_t)(g - s_pad_half + 360) % 360,
                                    (int32_t)(g + s_pad_half) % 360);
 }
 
-/* 검증용 — 공이 어디 있나. 픽셀로 찾으면 흰 판까지 잡혀서 못 쓴다. */
+/* For tests — where the ball is. Finding it by pixel also finds the paddle. */
 void brk_debug_ball(float *x, float *y) { if (x) *x = s_bx; if (y) *y = s_by; }
 
-/* 공을 딱 한 걸음(20ms 어치) 움직인다. 아래 brk_step 이 몇 번 부를지 정한다. */
+/* Move the ball exactly one step (20 ms). brk_step decides how many to take. */
 static void brk_phys(void)
 {
     if (s_obs_dps > 0.0f) {
@@ -479,7 +496,7 @@ static void brk_phys(void)
     float ang = atan2f(dx, -dy) / DEG2RAD;
     if (ang < 0) ang += 360;
 
-    /* 벽돌 — 네모라 판정이 단순하다 */
+    /* Bricks — rectangles, so the test is a box */
     bool hit_brick = false;
     for (int i = 0; i < s_brick_n; i++) {
         if (!s_alive[i]) continue;
@@ -487,8 +504,9 @@ static void brk_phys(void)
         if (s_bx < a->x1 - BALL_R || s_bx > a->x2 + BALL_R ||
             s_by < a->y1 - BALL_R || s_by > a->y2 + BALL_R) continue;
 
-        /* 🚨 단단한 벽돌은 한 번 맞으면 테두리만 벗고 버틴다. 안 깨져도
-         * 튕기는 건 똑같다 — 안 튕기면 그 안에 갇힌다. */
+        /* 🚨 A tough brick loses its outline on the first hit and stays put.
+         * It still bounces the ball — if it did not, the ball would end up
+         * trapped inside it. */
         if (s_hp[i] > 1) {
             s_hp[i]--;
             lv_obj_set_style_border_width(s_brick[i], 0, 0);
@@ -501,11 +519,12 @@ static void brk_phys(void)
             lv_label_set_text_fmt(s_score, "L%d  %d  o%d", s_level + 1,
                                   s_brick_n - s_left_cnt, s_brk_life);
         }
-        /* 어느 면으로 들어왔는지 보고 그 축만 뒤집는다.
-         * 🚨 **겹친 만큼 밀어내야 한다.** 안 밀면 단단한 벽돌(안 없어진다)
-         * 안에 남아서 다음 걸음에 또 뒤집힌다 — 두 번 뒤집히면 도로
-         * 들어가는 꼴이라 벽돌을 뚫고 지나간 것처럼 보인다. */
-        float o_r = a->x2 + BALL_R - s_bx;      /* 오른쪽으로 빠져나갈 거리 */
+        /* Flip whichever axis it came in on.
+         * 🚨 **Push it out by the overlap.** Without that it stays inside a
+         * tough brick (which does not disappear) and flips again next step —
+         * two flips put it back on its original heading, which looks exactly
+         * like passing straight through. */
+        float o_r = a->x2 + BALL_R - s_bx;      /* distance out to the right */
         float o_l = s_bx - (a->x1 - BALL_R);
         float o_d = a->y2 + BALL_R - s_by;
         float o_u = s_by - (a->y1 - BALL_R);
@@ -521,7 +540,7 @@ static void brk_phys(void)
     }
     if (lv_obj_has_flag(s_ball, LV_OBJ_FLAG_HIDDEN)) return;
 
-    /* 도는 방해물 — 구슬끼리 부딪히는 것이라 셈이 짧다 */
+    /* The spinning obstacle — circle against circle, so the test is short */
     if (s_obs_dps > 0.0f) {
         float hit = OBS_D * 0.5f + BALL_R;
         for (int i = 0; i < OBS_N; i++) {
@@ -534,8 +553,8 @@ static void brk_phys(void)
             float el = sqrtf(e2), nx = ex / el, ny = ey / el;
             float dp = s_vx * nx + s_vy * ny;
             if (dp < 0) { s_vx -= 2 * dp * nx; s_vy -= 2 * dp * ny; }
-            /* 🚨 겹친 만큼 반드시 밀어내야 한다. 안 밀면 다음 걸음에도
-             * 안에 있어서 계속 뒤집히다 방해물에 붙어 버린다. */
+        /* 🚨 Push it out by the overlap here too. Otherwise it is still
+         * inside next step, flips again, and ends up stuck to the bead. */
             s_bx = ox + nx * hit;
             s_by = oy + ny * hit;
             blip(700, 25);
@@ -543,32 +562,34 @@ static void brk_phys(void)
         }
     }
 
-    /* 🚨 한 걸음에 **하나만** 처리한다. 벽돌에서 한 번, 벽에서 또 한 번
-     * 뒤집으면 두 번 뒤집힌 것이라 원래 가던 방향으로 되돌아간다. */
+    /* 🚨 Handle **one** collision per step. Flipping once off a brick and
+     * again off the wall is two flips, which sends the ball back the way it
+     * came. */
     if (!hit_brick && r > PADDLE_R) {
         bool bottom = (ang > PAD_MIN - 8 && ang < PAD_MAX + 8);
         float da = fabsf(ang - s_pad_ang);
         if (da > 180) da = 360 - da;
 
-        if (!bottom) {                       /* 위·옆 벽은 그냥 튕긴다 */
+        if (!bottom) {                       /* top and sides just bounce */
             float nx = dx / r, ny = dy / r;
             float dp = s_vx * nx + s_vy * ny;
             s_vx -= 2 * dp * nx;
             s_vy -= 2 * dp * ny;
             s_bx = CX + nx * (PADDLE_R - 2);
             s_by = CY + ny * (PADDLE_R - 2);
-        } else if (da < s_pad_half) {        /* 판에 맞았다 */
+        } else if (da < s_pad_half) {        /* caught by the paddle */
             float nx = dx / r, ny = dy / r;
             float dp = s_vx * nx + s_vy * ny;
             s_vx -= 2 * dp * nx;
             s_vy -= 2 * dp * ny;
-            /* 판의 어디에 맞았는지에 따라 각도를 살짝 튼다 — 조작감이 산다.
-             * 각도만 바꾸고 속도는 아래에서 다시 맞춰준다. */
+            /* Where on the paddle it landed nudges the angle — that is what
+             * makes it feel steerable. Angle only; speed is reset below. */
             float off = (ang - s_pad_ang) / s_pad_half;
             s_vx += off * 1.1f;
 
-            /* 튈 때마다 조금씩 빨라지되 크기는 항상 정해준다. 안 그러면
-             * 반사가 쌓이면서 제멋대로 느려지거나 빨라진다. */
+            /* Gain a little on each bounce, but always set the magnitude.
+             * Otherwise reflections accumulate and it drifts faster or slower
+             * on its own. */
             if (s_spd < s_spd0) s_spd = s_spd0;
             s_spd *= BALL_RAMP;
             if (s_spd > s_spdmax) s_spd = s_spdmax;
@@ -577,11 +598,11 @@ static void brk_phys(void)
             s_bx = CX + nx * (PADDLE_R - 3);
             s_by = CY + ny * (PADDLE_R - 3);
             blip(500, 30);
-        } else if (r > 224) {                /* 놓쳤다 */
+        } else if (r > 224) {                /* missed */
             lv_obj_add_flag(s_ball, LV_OBJ_FLAG_HIDDEN);
             stop_loop();
-            /* 🚨 기체가 남았으면 **그 단계를 그대로** 다시 쌓는다. 다 쓰면
-             * 그때 1단계로 돌아간다 — 그게 판이 끝나는 자리다. */
+            /* 🚨 With a ball left, rebuild **the same level**. Only when they
+             * run out does it go back to level 1 — that is where a run ends. */
             if (--s_brk_life > 0) {
                 lv_label_set_text_fmt(s_score, "L%d  o%d", s_level + 1, s_brk_life);
             } else {
@@ -606,46 +627,48 @@ static void brk_phys(void)
     }
 }
 
-/* 🚨 예전엔 타이머가 불릴 때마다 딱 한 걸음씩 갔다. LVGL 타이머는 화면
- * 그리기가 길어지면 늦게 오고, 밀렸다가 몰아서 오기도 한다 — 그래서 공이
- * 버벅이다 튀는 느낌이 났다(0908 실기). 진짜 흐른 시간을 재서 그만큼
- * 걸음을 나눠 밟는다. 걸음 자체는 20ms 고정이라 충돌 판정은 그대로다. */
-/* ── 기울이는 것도 조작이다 ──────────────────────────────────
- * 🚨 런처는 `lv_display_get_inactive_time()` 으로 무동작을 재는데, 그건
- * **터치만** 조작으로 친다. 기울여 노는 게임은 화면을 안 만지니 한창 굴리는
- * 중에 화면이 꺼졌다(0909 지적).
- * 자세가 실제로 바뀌는 동안만 깨워둔다 — 책상에 내려놓으면 안 움직이니
- * 평소처럼 꺼진다. 🚨 기울기를 쓰는 판에서만 부를 것. 터치로 모는 판은
- * 터치가 이미 조작으로 세므로 여기 손댈 이유가 없다. */
+/* 🚨 This used to take exactly one step per timer call. LVGL timers arrive
+ * late when drawing runs long, and sometimes arrive in a burst — which is
+ * what made the ball stutter and then jump. Measure the time that actually
+ * passed and spend it as whole steps. The step stays 20 ms, so collision
+ * behaviour does not change with frame rate. */
+/* ── tilting counts as input ──────────────────────────────────
+ * 🚨 The launcher measures idleness with lv_display_get_inactive_time(),
+ * which only counts touches. A game played by tilting never touches the
+ * screen, so the display would go dark mid-game.
+ * Stay awake only while the attitude is actually changing — put the badge
+ * down and it sleeps as usual. 🚨 Call this only from tilt-driven boards. On
+ * touch-driven ones the touch already counts and there is nothing to fix. */
 static void tilt_is_input(float lat)
 {
     static float last; static bool have;
-    if (have && fabsf(lat - last) < 25.0f) return;   /* 손떨림은 조작이 아니다 */
+    if (have && fabsf(lat - last) < 25.0f) return;   /* a shaky hand is not input */
     last = lat; have = true;
     lv_display_trigger_activity(NULL);
 }
 
-/* 기울기로 판을 몬다. 켤 때의 자세가 한가운데다 — 어떤 자세로 들고 있든
- * 거기서부터 재니까 누워서도 서서도 쓸 수 있다. */
+/* Steer the paddle by tilt. Whatever attitude it started in is the centre, so
+ * it works lying down or standing up. */
 static void tilt_drive_paddle(void)
 {
     float gx, gy;
     if (!port_imu_accel(&gx, &gy)) return;
-    /* 🚨 IMU 축은 화면 축과 90도 돌아가 있고(구슬에서 확인), 판 각도는
-     * 커질수록 왼쪽으로 간다(PAD_MIN 128 이 오른쪽 아래, PAD_MAX 232 가
-     * 왼쪽 아래다). 둘을 맞춰야 기울인 쪽으로 판이 간다.
-     * 우로 기울이면 gy 가 음수 → 각도가 줄어 오른쪽으로. */
+    /* 🚨 The IMU axes are rotated 90 degrees from the screen's (established
+     * with the marble), and the paddle angle grows leftward (PAD_MIN 128 is
+     * bottom right, PAD_MAX 232 bottom left). Both have to be lined up for
+     * the paddle to go the way you tilt.
+     * Tilt right and gy goes negative, the angle shrinks, the paddle goes right. */
     float lat = gy;
-    tilt_is_input(lat);          /* 기울기 모드에서만 오는 길이다 */
+    tilt_is_input(lat);          /* only reachable in tilt mode */
     if (!s_tilt0_set) {
         s_tilt0 = lat; s_tilt0_set = true;
-        ESP_LOGI("game", "기울기 기준 잡음 lat=%.1f", lat);
+        ESP_LOGI("game", "tilt reference taken, lat=%.1f", lat);
     }
-    float d = (lat - s_tilt0) * 0.11f;          /* 기울인 만큼 각도로 */
+    float d = (lat - s_tilt0) * 0.11f;          /* tilt, as an angle */
     float want = (PAD_MIN + PAD_MAX) * 0.5f + d;
     if (want < PAD_MIN) want = PAD_MIN;
     if (want > PAD_MAX) want = PAD_MAX;
-    /* 곧바로 따라가면 손떨림까지 따라간다. 조금 늦게 붙는다. */
+    /* Following it exactly follows the shake too. Lag slightly behind. */
     s_pad_ang += (want - s_pad_ang) * 0.35f;
     paddle_draw();
 }
@@ -655,20 +678,22 @@ static void brk_step(lv_timer_t *t)
     (void)t;
     static uint32_t nstep;
     if ((nstep++ % 200) == 0)
-        ESP_LOGI("game", "브릭 %u걸음째 기울기모드=%d 판각=%.0f",
+        ESP_LOGI("game", "brick step %u, tilt mode=%d, paddle=%.0f",
                  (unsigned)nstep, (int)s_tiltmode, s_pad_ang);
     if (s_tiltmode) tilt_drive_paddle();
-    /* 화면이 꺼졌으면 공은 굴릴 이유가 없다. 예전엔 검은 덮개 뒤에서
-     * 초당 50번 계속 돌고 벽에 맞을 때마다 소리까지 냈다. */
+    /* With the display off there is no reason to move the ball. It used to
+     * keep running fifty times a second behind the black veil, chirping at
+     * every wall. */
     if (launcher_screen_is_off()) { port_tone_enable(false); port_tone_hold(false); s_brk_last = 0; return; }
-    /* 🚨 효과음마다 코덱을 여닫으면 첫 소리가 통째로 빠진다(0908 실기).
-     * 판이 도는 동안엔 열어둔다 — 이미 열려 있으면 하는 일이 없다. */
+    /* 🚨 Opening and closing the codec per sound effect loses the first one
+     * entirely. Hold it open while a board is running — if it is already
+     * open this does nothing. */
     port_tone_hold(true);
 
     uint32_t now = lv_tick_get();
     if (!s_brk_last) { s_brk_last = now; brk_phys(); return; }
     uint32_t el = now - s_brk_last;
-    if (el > 200) el = 200;          /* 앱 전환처럼 오래 멈췄으면 순간이동 금지 */
+    if (el > 200) el = 200;          /* after a long pause (app switch), no teleporting */
     s_brk_acc += el;
     s_brk_last = now;
 
@@ -677,7 +702,7 @@ static void brk_step(lv_timer_t *t)
         s_brk_acc -= 20;
         brk_phys();
         steps++;
-        /* 공을 놓쳤거나 다 깼으면 루프가 이미 멈췄다 — 더 밟지 않는다 */
+        /* Ball lost or board cleared means the loop already stopped — stop stepping */
         if (!s_loop || lv_obj_has_flag(s_ball, LV_OBJ_FLAG_HIDDEN)) break;
     }
 }
@@ -708,8 +733,8 @@ static void brk_touch(lv_event_t *e)
         return;
     }
 
-    if (s_tiltmode) return;      /* 기울기로 모는 중엔 손가락이 안 뺏는다 */
-    /* 다이얼처럼 돌린 만큼. 다만 아래쪽 호를 벗어나지 못한다. */
+    if (s_tiltmode) return;      /* while tilting, a finger does not take over */
+    /* Turns like a dial, but cannot leave the bottom arc. */
     float d = a - s_grab_ang;
     while (d > 180)  d -= 360;
     while (d < -180) d += 360;
@@ -719,19 +744,19 @@ static void brk_touch(lv_event_t *e)
     paddle_draw();
 }
 
-/* 검증용 — 벽돌깨기를 곧바로 굴린다(탭을 기다리지 않는다).
- * 게임이 도는 동안 타이머가 실제로 몇 ms 마다 오는지 재려면 필요하다.
- * 그 값이 공 속도를 정한다. */
-/* 검증용 — 잡은 "수평" 기준과 지금 값을 밖에서 대조할 수 있게 낸다.
- * 🚨 IMU 를 재웠다 깬 직후 기준을 잡으면 엉뚱한 데 박히는데, 눈으로는
- * "판이 안 움직인다" 로만 보인다. 숫자로 봐야 잡힌다. */
+/* For tests — start brick breaker immediately, without waiting for a tap.
+ * Needed to measure how many milliseconds the timer actually takes while a
+ * game is running, which is what sets the ball speed. */
+/* For tests — expose the captured "level" reference next to the live value.
+ * 🚨 Taking a reference right after waking the IMU puts it somewhere wrong,
+ * and all you see is a paddle that will not move. Only the numbers show it. */
 void games_debug_tilt0(float *base, int *set)
 {
     if (base) *base = s_tilt0;
     if (set)  *set  = s_tilt0_set ? 1 : 0;
 }
 
-/* 검증용 — 천체를 곧바로 띄운다(고르는 화면을 건너뛴다) */
+/* For tests — open the planets directly, skipping the chooser */
 void games_debug_play_orb(void)
 {
     clear_board();
@@ -741,20 +766,20 @@ void games_debug_play_orb(void)
 
 
 
-/* 검증용 — 벽돌깨기를 곧바로 굴린다(탭을 기다리지 않는다).
- * 게임이 도는 동안 타이머가 실제로 몇 ms 마다 오는지 재려면 필요하다.
- * 그 값이 공 속도를 정한다. */
-void games_debug_play_bricks(void);   /* 아래에 있다 */
+/* For tests — start brick breaker immediately, without waiting for a tap.
+ * Needed to measure how many milliseconds the timer actually takes while a
+ * game is running, which is what sets the ball speed. */
+void games_debug_play_bricks(void);   /* defined below */
 
-/* 검증용 — 벽돌깨기를 원하는 단계로 곧바로 굴린다. 다섯 판을 사람 없이
- * 돌려보려면 이 문이 있어야 한다. */
+/* For tests — start brick breaker at a chosen level. Without this door there
+ * is no way to walk all five without a person. */
 void games_debug_brk_level(int lv)
 {
     s_level = (lv < 0) ? 0 : (lv >= BRK_LEVELS ? BRK_LEVELS - 1 : lv);
     games_debug_play_bricks();
 }
 
-/* 검증용 — 지금 판이 표대로 세워졌는지 밖에서 대조한다. */
+/* For tests — check from outside that the board matches the level table. */
 void games_debug_brk_info(int *level, int *n, int *left, int *tough,
                           float *padh, float *obs)
 {
@@ -781,8 +806,8 @@ void games_debug_play_bricks(void)
     s_loop = lv_timer_create(brk_step, 20, NULL);
 }
 
-/* 단계를 넘기거나 놓쳤을 때 판을 다시 세운다. 🚨 반드시 defer 로 부를 것 —
- * 타이머 콜백 안에서 lv_obj_clean 을 하면 지금 도는 그 객체를 지운다. */
+/* Rebuild the board on a level change or a miss. 🚨 Always through defer —
+ * lv_obj_clean from inside a timer callback deletes the object running it. */
 static void brk_rebuild(void)
 {
     clear_board();
@@ -792,8 +817,8 @@ static void brk_rebuild(void)
 
 void brk_start(void)
 {
-    /* 게임 중엔 손잡이를 숨기므로 가운데에서 시작해도 안 겹친다.
-     * 판은 아래 한가운데, 공은 그 바로 위. */
+    /* The handle is hidden during a game, so starting in the middle does not
+     * overlap it. Paddle at bottom centre, ball just above. */
     if (s_level < 0 || s_level >= BRK_LEVELS) s_level = 0;
     const brk_level_t *L = &BRK_LV[s_level];
     s_spd0     = L->spd0;
@@ -805,9 +830,9 @@ void brk_start(void)
     s_pad_ang = (PAD_MIN + PAD_MAX) / 2;
     s_bx = CX;
     s_by = CY + (PADDLE_R - 40);
-    s_brk_last = s_brk_acc = 0;                      /* 시간 누적도 처음부터 */
-    s_spd = s_spd0;                                  /* 판마다 처음부터 */
-    s_vx = s_spd0 * 0.6f; s_vy = -s_spd0 * 0.8f;     /* 3:4 방향 */
+    s_brk_last = s_brk_acc = 0;                      /* banked time restarts too */
+    s_spd = s_spd0;                                  /* fresh speed each board */
+    s_vx = s_spd0 * 0.6f; s_vy = -s_spd0 * 0.8f;     /* a 3:4 heading */
     s_brick_n = 0;
 
     lv_obj_t *pad = lv_obj_create(s_root);
@@ -819,22 +844,25 @@ void brk_start(void)
     lv_obj_add_event_cb(pad, brk_touch, LV_EVENT_PRESSING, NULL);
     lv_obj_add_event_cb(pad, brk_touch, LV_EVENT_RELEASED, NULL);
 
-    /* 위쪽에 세 줄 또는 네 줄. 줄마다 원이 허락하는 폭을 재서 개수와 너비를
-     * 맞춘다. 🚨 네 줄일 땐 **위로** 올려서 시작한다. 아래로 한 줄 더 붙이면
-     * 맨 아랫줄이 화면 한가운데까지 내려와 공이 판까지 오는 거리가 확 줄고,
-     * 그건 난이도가 아니라 반응할 시간을 뺏는 것이다. */
+    /* Three or four rows at the top. Each row measures what the circle allows
+     * and fits its count and width to it. 🚨 Four rows start **higher**, not
+     * lower. Hanging an extra row underneath brings the bottom row down to
+     * the middle of the screen and cuts the ball's travel to the paddle,
+     * which does not add difficulty — it just removes reaction time. */
     static const uint32_t COL[BRK_ROWS] = { 0x7FB0FF, 0x5BD48A, 0xE0A33A, 0xC98BE0 };
     int rows = (L->rows < 3) ? 3 : (L->rows > BRK_ROWS ? BRK_ROWS : L->rows);
-    /* 🚨 단추가 벽을 피해 안으로 들어왔다(GBTN_IN_DY = -174 → y 42~76).
-     * 줄은 그 아래부터다. 예전 값(60)이면 단추가 첫 줄을 덮는다. */
+    /* 🚨 The buttons moved inward to clear the wall (GBTN_IN_DY = -174, so
+     * y 42..76). Rows start below that. The old value (60) put the buttons on
+     * top of the first row. */
     int top  = BRK_TOP;
     for (int row = 0; row < rows; row++) {
         int y = top + row * (BRK_H + BRK_GAP);
-        /* 🚨 **아래 모서리로 쟀던 게 틀렸다.** 줄은 전부 가운데보다 위에
-         * 있으니 원에 먼저 부딪히는 쪽은 **위 모서리**다. 아래 모서리로
-         * 재면 줄 끝의 위쪽 귀퉁이가 원 밖으로 한참 나간다 — 첫 줄은
-         * r=225 까지 나갔다(벽은 206). 벽을 긋고 나서야 보였다(0911 지적:
-         * "벽돌이랑 겹치잖아"). 두 모서리 중 **먼 쪽**으로 잰다. */
+        /* 🚨 **Measuring from the bottom edge was wrong.** Every row is above
+         * centre, so the corner that meets the circle first is the **top**
+         * one. Measured from the bottom edge, the upper corners of the end
+         * bricks stick well outside — the first row reached r=225 against a
+         * wall at 206. It only became visible once the wall was drawn
+         * ("the bricks overlap it"). Measure from whichever edge is further. */
         float fa1 = fabsf((float)y - 233.0f);
         float fa2 = fabsf((float)(y + BRK_H) - 233.0f);
         float far = fa1 > fa2 ? fa1 : fa2;
@@ -848,11 +876,11 @@ void brk_start(void)
         int x0 = 233 - total / 2;
 
         for (int k = 0; k < n; k++) {
-            /* 단계마다 배치를 바꾼다. 같은 판을 더 빠르게가 아니라
-             * 다른 판이 되도록. */
+            /* Each level rearranges the bricks. The point is a different
+             * board, not the same board faster. */
             bool skip = false;
-            if (L->pattern == 1)      skip = ((row + k) & 1);          /* 체크무늬 */
-            else if (L->pattern == 2) skip = (n >= 5 && k == n / 2);   /* 가운데 한 칸 빔 */
+            if (L->pattern == 1)      skip = ((row + k) & 1);          /* checker */
+            else if (L->pattern == 2) skip = (n >= 5 && k == n / 2);   /* one gap in the middle */
             if (skip) continue;
 
             int x = x0 + k * (bw + BRK_GAP);
@@ -863,12 +891,13 @@ void brk_start(void)
             lv_obj_set_style_radius(b, 4, 0);
             lv_obj_set_style_bg_color(b, lv_color_hex(COL[row]), 0);
             lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
-            /* 단단한 벽돌은 흰 테두리를 두른다. 한 번 맞으면 테두리를 벗는다 —
-             * 보이는 것만 바뀌고 그리는 값은 그대로다. */
+            /* Tough bricks get a white outline and lose it on the first hit —
+             * only the look changes, the geometry stays put. */
             s_hp[s_brick_n] = (row < L->tough_rows) ? 2 : 1;
             if (s_hp[s_brick_n] > 1) {
-                /* 🚨 remove_style_all 을 한 객체는 border_side 가 NONE 이라
-                 * 굵기와 색만 줘도 아무것도 안 그려진다. 면을 켜야 보인다. */
+                /* 🚨 After remove_style_all an object has border_side NONE,
+                 * so width and colour alone draw nothing. The sides have to
+                 * be switched on. */
                 lv_obj_set_style_border_side(b, LV_BORDER_SIDE_FULL, 0);
                 lv_obj_set_style_border_width(b, 3, 0);
                 lv_obj_set_style_border_color(b, lv_color_white(), 0);
@@ -886,12 +915,13 @@ void brk_start(void)
     }
     s_left_cnt = s_brick_n;
 
-    /* 🚨 어디까지가 벽이고 어디가 구멍인지 안 보였다(0911 지적). 판만 그려
-     * 놓으니 나머지가 전부 똑같이 비어 있어서, 위·옆으로 튕겨 나오는 것도
-     * 아래로 빠지는 것도 다 우연처럼 보인다. **막힌 만큼만** 얇게 긋는다.
-     * 막힌 구간은 판정과 같은 자리다 — brk_phys 의 `bottom` 이 거짓인 곳,
-     * 즉 12시 기준 240도에서 시계방향으로 120도까지. lv_arc 는 3시가 0도라
-     * 90 을 빼면 150 → 30 이다. */
+    /* 🚨 You could not see where the wall was and where the gap was. With
+     * only the paddle drawn, everything else looked equally empty, so
+     * bouncing off the top and falling out the bottom both looked like luck.
+     * Draw a thin line over **exactly the solid part**. That is the same
+     * range the collision uses — where `bottom` is false in brk_phys, which
+     * is 240 degrees clockwise from 12 o'clock, for 120 degrees. LVGL puts 0
+     * at 3 o'clock, so subtracting 90 gives 150 -> 30. */
     lv_obj_t *wall = lv_arc_create(s_root);
     lv_obj_remove_style_all(wall);
     lv_obj_remove_flag(wall, LV_OBJ_FLAG_CLICKABLE);
@@ -902,8 +932,9 @@ void brk_start(void)
     lv_obj_set_style_arc_width(wall, BRK_WALL_W, LV_PART_MAIN);
     lv_obj_set_style_arc_color(wall, lv_color_hex(0x3A3A46), LV_PART_MAIN);
 
-    /* 🚨 판도 같은 안쪽 면에 맞춘다. 예전 크기(422)면 안쪽 면이 r=195 라
-     * 공(중심 198, 반지름 8)이 판에 절반쯤 파묻힌 채로 튕겼다. */
+    /* 🚨 The paddle uses the same inner face. At the old size (422) that face
+     * was at r=195, so the ball (centre 198, radius 8) bounced while half
+     * buried in it. */
     s_paddle = lv_arc_create(s_root);
     lv_obj_remove_style_all(s_paddle);
     lv_obj_remove_flag(s_paddle, LV_OBJ_FLAG_CLICKABLE);
@@ -923,9 +954,10 @@ void brk_start(void)
     }
 
     s_ball = dot(s_root, (int)(BALL_R * 2), 0xFFFFFF);
-    /* 🚨 놓아주지 않으면 LVGL 이 새 객체를 (0,0) 에 둔다 — "tap to start" 가
-     * 떠 있는 동안 공이 왼쪽 위 구석에 앉아 있었다. 첫 걸음이 오기 전까지
-     * 그대로다. 핀볼은 만들자마자 놓고 있었는데 여기만 빠졌다. */
+    /* 🚨 Position it or LVGL leaves a new object at (0,0) — the ball sat in
+     * the top-left corner for as long as "tap to start" was showing, and only
+     * jumped into place on the first step. Pinball placed its ball on
+     * creation; this was the one that did not. */
     put(s_ball, s_bx, s_by);
     s_score = make_score();
     lv_label_set_text_fmt(s_score, "L%d  0  o%d", s_level + 1, s_brk_life);
@@ -934,9 +966,9 @@ void brk_start(void)
     arm_start(brk_step, 20);
 }
 
-/* ── 3) 구슬 미로 ────────────────────────────────────────────
- * 기울이면 구슬이 굴러간다. 구멍에 넣으면 다음 구멍이 다른 자리에 생긴다.
- * IMU 가 없는 시뮬에서는 손가락 위치를 기울기 대신 쓴다. */
+/* ── 3) marble maze ──────────────────────────────────────────
+ * Tilt and the marble rolls. Drop it in the hole and the next hole appears
+ * somewhere else. With no IMU, the simulator uses the finger position instead. */
 
 static lv_obj_t *s_marble, *s_hole;
 static float     s_mx, s_my, s_mvx, s_mvy, s_hx, s_hy;
@@ -946,59 +978,60 @@ static float     s_fake_gx, s_fake_gy;
 static void new_hole(void)
 {
     float a = (float)(rand() % 360) * DEG2RAD;
-    float r = 50 + (float)(rand() % 120);       /* 가장자리까지 안 밀어붙인다 */
+    float r = 50 + (float)(rand() % 120);       /* keep it off the very edge */
     s_hx = CX + cosf(a) * r;
     s_hy = CY + sinf(a) * r;
     put(s_hole, s_hx, s_hy);
 }
 
-/* 검증용 — 구슬이 어디 있나. 기울기 축이 안 뒤집혔는지 재려면 필요하다. */
+/* For tests — where the marble is. Needed to check the tilt axes are not flipped. */
 void mz_debug_ball(float *x, float *y) { if (x) *x = s_mx; if (y) *y = s_my; }
 
 static void maze_step(lv_timer_t *t)
 {
     (void)t;
-    /* 화면이 꺼졌으면 공은 굴릴 이유가 없다. 예전엔 검은 덮개 뒤에서
-     * 초당 50번 계속 돌고 벽에 맞을 때마다 소리까지 냈다. */
+    /* With the display off there is no reason to roll it. It used to keep
+     * running fifty times a second behind the black veil, chirping at every wall. */
     if (launcher_screen_is_off()) { port_tone_enable(false); port_tone_hold(false); return; }
     port_tone_hold(true);
     float gx, gy;
     if (!port_imu_accel(&gx, &gy)) { gx = s_fake_gx; gy = s_fake_gy; }
-    tilt_is_input(gy);           /* 구슬은 기울기로만 논다 */
+    tilt_is_input(gy);           /* the marble is played by tilt alone */
 
-    /* 시작할 때의 자세를 빼서 "그 자세 기준으로 얼마나 기울였나"만 남긴다.
-     * 이러면 눕혀 놔도 세워 들어도 시작 자세가 곧 수평이 된다. */
+    /* Subtract the attitude at the start, leaving only "how far from there".
+     * That makes the starting pose level, lying down or held up. */
     if (s_g0_set) { gx -= s_g0x; gy -= s_g0y; }
 
-    /* mg 단위를 가속도로. 값이 커서 많이 줄인다.
-     * 부호: 0905 에 기준 방향을 MADCTL 로 180도 뒤집으면서(스트랩 착용 방향)
-     * IMU 축과 화면 축의 대응도 같이 뒤집혔다. IMU 는 기판에 고정이라
-     * 화면을 돌려도 안 따라온다 — 여기서 손으로 맞춰준다. */
-    /* 🚨 부호가 아니라 축이 통째로 어긋나 있었다. IMU 는 기판에 붙어 있고
-     * 화면 축과 90도 돌아가 있다 — 부호만 뒤집어봐야 계속 옆으로 굴렀다
-     * (0908 에 그렇게 두 번 틀렸다).
+    /* mg into acceleration. The numbers are large, so this scales them well down.
+     * On signs: flipping the display 180 degrees with MADCTL in an earlier
+     * revision (for how the strap sits) also flipped how the IMU axes map to
+     * the screen. The IMU is bolted to the board and does not rotate with the
+     * display, so the correction is made here by hand. */
+    /* 🚨 It was not the signs — the axes were swapped outright. The IMU sits
+     * on the board rotated 90 degrees from the screen, so flipping signs just
+     * kept it rolling sideways (wrong twice before this was understood).
      *
-     * 0909 실기 관찰 네 가지로 역산했다(고치기 전 상태):
-     *     우로 기울임 → 아래로   ⇒ gy 가 화면 세로를 몰고, 우 = gy 음수
-     *     좌로 기울임 → 위로
-     *     앞으로 기울임 → 왼쪽   ⇒ gx 가 화면 가로를 몰고, 앞 = gx 양수
-     *     안으로 기울임 → 오른쪽
-     * 즉 gx 는 세로(앞뒤), gy 는 가로(좌우) 를 맡아야 한다. 서로 바꾼다.
+     * Worked backwards from four observations of the broken version:
+     *     tilt right   -> went down    => gy drives the screen's vertical
+     *     tilt left    -> went up
+     *     tilt forward -> went left    => gx drives the screen's horizontal
+     *     tilt back    -> went right
+     * So gx belongs to vertical and gy to horizontal. Swap them.
      *
-     * 바뀐 뒤 기대: 우 → 우 · 좌 → 좌 · 앞 → 위(앞) · 안 → 아래(안).
-     * 통을 기울이면 내용물이 그쪽으로 쏠린다 — 사람이 기대하는 방향이다. */
+     * After: right -> right, left -> left, forward -> up, back -> down.
+     * Tip a bowl and the contents go that way, which is what anyone expects. */
     s_mvx -= gy * 0.00032f;
     s_mvy -= gx * 0.00032f;
-    s_mvx *= 0.965f;                 /* 구르는 마찰 — 세게 걸어 가장자리에 안 붙게 */
+    s_mvx *= 0.965f;                 /* rolling friction, firm enough to keep it off the rim */
     s_mvy *= 0.965f;
 
-    /* 너무 빠르면 구멍을 뛰어넘는다. 위를 막는다. */
+    /* Too fast and it jumps over the hole. Cap it. */
     float sp = sqrtf(s_mvx * s_mvx + s_mvy * s_mvy);
     if (sp > 7.0f) { s_mvx = s_mvx / sp * 7.0f; s_mvy = s_mvy / sp * 7.0f; }
     s_mx += s_mvx;
     s_my += s_mvy;
 
-    /* 가장자리에서 튕긴다 */
+    /* Bounce off the rim */
     float dx = s_mx - CX, dy = s_my - CY;
     float r = sqrtf(dx * dx + dy * dy);
     if (r > 202) {
@@ -1012,7 +1045,7 @@ static void maze_step(lv_timer_t *t)
     put(s_marble, s_mx, s_my);
 
     float hdx = s_mx - s_hx, hdy = s_my - s_hy;
-    if (hdx * hdx + hdy * hdy < 30 * 30) {      /* 구멍 판정을 넉넉히 */
+    if (hdx * hdx + hdy * hdy < 30 * 30) {      /* a generous hole */
         s_got++;
         lv_label_set_text_fmt(s_score, "%d", s_got);
         blip(1200, 80);
@@ -1028,7 +1061,7 @@ static void maze_touch(lv_event_t *e)
     if (!in) return;
     lv_point_t p;
     lv_indev_get_point(in, &p);
-    /* 시뮬은 손가락 쪽으로 끌리게. 위에서 gx/gy 를 맞바꿨으니 여기도 바꾼다 */
+    /* In the simulator it drifts toward the finger. gx/gy were swapped above, so swap here too */
     s_fake_gx = -(p.y - CY) * 4.0f;
     s_fake_gy = -(p.x - CX) * 4.0f;
 }
@@ -1059,7 +1092,7 @@ void maze_start(void)
 
     s_hole = dot(s_root, 34, 0x3A3A44);
     s_marble = dot(s_root, 22, 0xE8E8F0);
-    put(s_marble, s_mx, s_my);   /* 벽돌과 같은 이유 — 안 놓으면 (0,0) 이다 */
+    put(s_marble, s_mx, s_my);   /* same reason as the brick ball — otherwise (0,0) */
     new_hole();
     s_score = make_score();
     lv_label_set_text(s_score, "0");
@@ -1067,17 +1100,19 @@ void maze_start(void)
     arm_start(maze_step, 25);
 }
 
-/* ── 4) 핀볼 ─────────────────────────────────────────────────
- * 둥근 화면이 곧 테이블이다. 핀볼 경기장은 원래 둥근 접시라 네모로 만들면
- * 오히려 어색하다 — 벽돌깨기의 링 패들처럼 원형이 규칙을 더 좋게 만드는 쪽.
+/* ── 4) pinball ──────────────────────────────────────────────
+ * The round screen is the table. A pinball playfield is a round dish to begin
+ * with, and a rectangle would be the odd choice — like the ring paddle in
+ * brick breaker, this is a case where round makes the rules better.
  *
- * 🚨 진짜 테이블을 축소해 넣지 않았다. 요소를 여덟 개쯤 넣으면 하나가
- * 20~40px(2~4mm)이 되어 뭐가 뭔지 구분이 안 된다. 여섯 개만 두고 하나를
- * 크게 키웠다 — 범퍼 셋, 날개 둘, 빠지는 구멍 하나.
+ * 🚨 It is not a real table shrunk down. Fit eight or so elements in and each
+ * one is 20-40 px (2-4 mm) and they stop being distinguishable. There are
+ * six, and they are large: three bumpers, two flippers, one drain.
  *
- * 🚨 손이 계속 붙어 있어야 게임이다. 던지고 구경하는 물건이 되지 않게
- * 날개 둘 말고도 **배지를 기울여 공을 밀 수 있다**(nudge). 진짜 핀볼에서
- * 대(臺)를 툭툭 치는 그 기술이고, 여기선 그게 진짜 기울기다. */
+ * 🚨 A game is something your hands stay on. So that this is not "launch it
+ * and watch", the flippers are not the only input — **tilting the badge
+ * nudges the ball**. That is the real technique in pinball, and here it is an
+ * actual tilt. */
 
 static bool pb_sub(const float *om, bool *kicked);
 
@@ -1091,9 +1126,11 @@ static void pb_flip_draw(int i)
     lv_line_set_points(s_flip_obj[i], s_flip_pt[i], 2);
 }
 
-/* 날개에 맞았나. 선분에서 가장 가까운 점을 찾아 그 법선으로 튕긴다.
- * 🚨 날개가 **도는 중이면 그 속도를 얹어야** 한다. 안 얹으면 공이 날개에
- * 그냥 부딪혀 떨어질 뿐이라 핀볼이 안 된다 — 쳐서 올리는 맛이 전부다. */
+/* Did it hit a flipper? Find the nearest point on the segment and reflect
+ * about that normal.
+ * 🚨 If the flipper is **moving, its speed has to be added**. Without that the
+ * ball merely bounces off and drops, and it is not pinball — being hit up the
+ * table is the whole thing. */
 static bool pb_flip_hit(int i, float omega)
 {
     pb_flip_t *f = &s_flip[i];
@@ -1115,7 +1152,7 @@ static bool pb_flip_hit(int i, float omega)
     float dp = s_pb_vx * nx + s_pb_vy * ny;
     if (dp < 0) { s_pb_vx -= 1.75f * dp * nx; s_pb_vy -= 1.75f * dp * ny; }
     if (omega != 0.0f) {
-        float w = omega * DEG2RAD;              /* 걸음당 라디안 */
+        float w = omega * DEG2RAD;              /* radians per step */
         s_pb_vx += -ey * w * t;
         s_pb_vy +=  ex * w * t;
     }
@@ -1134,7 +1171,7 @@ static void pb_lose_ball(void)
         defer(pb_rebuild);
         return;
     }
-    /* 다음 공은 위쪽에서 떨어진다 */
+    /* The next ball drops in from the top */
     s_pb_x = CX + 96.0f; s_pb_y = CY - 150.0f;
     s_pb_vx = -1.2f; s_pb_vy = 0.6f;
     lv_label_set_text_fmt(s_score, "%d  o%d", s_pb_pts, s_pb_left);
@@ -1142,15 +1179,15 @@ static void pb_lose_ball(void)
 
 static void pb_phys(void)
 {
-    /* 🚨 기울기가 곧 테이블 경사다. 축 대응은 이 배지에서 잰 값이 하나뿐이고
-     * 물·구슬이 이미 그걸 쓴다:
-     *     화면 오른쪽 = -ay      화면 아래 = -ax
-     * 핀볼만 `+gy` 를 화면 오른쪽으로 썼다. 그래서 **좌우가 뒤집혔고**
-     * (0911 제보: "왼쪽으로 기울이면 오른쪽"), 세로는 기울기를 아예 안 봐서
-     * 앞뒤로 기울여도 공이 반응하지 않았다.
-     * 🚨 예전엔 시작할 때의 자세를 0 으로 잡았다(s_pb_tilt0). 테이블 경사는
-     * 들고 있는 자세와 무관한 절대값이라 그러면 안 된다 — 비스듬히 들고
-     * 시작하면 그 비스듬함이 '수평' 이 돼버린다. 뺐다. */
+    /* 🚨 Tilt is the table's slope. There is one measured axis mapping on
+     * this badge and the water and marble already use it:
+     *     screen right = -ay      screen down = -ax
+     * Pinball was the one using `+gy` for right, so **left and right were
+     * reversed** ("tilt left and it goes right"), and it never looked at the
+     * vertical at all, so tilting forward and back did nothing.
+     * 🚨 It also used to take the attitude at launch as zero (s_pb_tilt0).
+     * A table's slope is absolute, not relative to how you hold it — starting
+     * while tilted made that tilt into "level". Removed. */
     float gx, gy;
     if (port_imu_accel(&gx, &gy)) {
         tilt_is_input(gy);
@@ -1158,15 +1195,15 @@ static void pb_phys(void)
         s_pb_vy += -gx * PB_TILT;
     }
 
-    /* 🚨 기본 경사는 남긴다. 기울기만으로 굴리면 평평하게 들었을 때 공이
-     * 떠 있다 — 진짜 핀볼 대(臺)도 늘 앞으로 기울어 있다. */
+    /* 🚨 Keep the built-in slope. On tilt alone the ball floats when the
+     * badge is flat, and a real table is always tipped toward you. */
     s_pb_vy += PB_GRAV;
     s_pb_vx *= PB_DAMP;
     s_pb_vy *= PB_DAMP;
     float sp = sqrtf(s_pb_vx * s_pb_vx + s_pb_vy * s_pb_vy);
     if (sp > PB_MAXV) { s_pb_vx = s_pb_vx / sp * PB_MAXV; s_pb_vy = s_pb_vy / sp * PB_MAXV; }
 
-    /* 날개를 목표 각으로 옮긴다. 이번 걸음에 얼마나 돌았는지가 손맛이다. */
+    /* Move the flippers toward their target. How far they turned this step is the feel. */
     float om[2];
     for (int i = 0; i < 2; i++) {
         float want = s_flip[i].on ? s_flip[i].up : s_flip[i].rest;
@@ -1175,8 +1212,9 @@ static void pb_phys(void)
         if (d < -PB_FLIP_STEP) d = -PB_FLIP_STEP;
         om[i] = d;
     }
-    /* 🚨 날개가 쳐 주는 속도(om)는 **걸음당** 값이라 조각마다 나누면 안 된다.
-     * 대신 한 걸음에 한 번만 얹는다 — 조각마다 얹으면 세 배로 날아간다. */
+    /* 🚨 The speed a flipper imparts (om) is **per step**, so it must not be
+     * divided across the sub-steps. Apply it once per step — applying it in
+     * each sub-step launches the ball three times as hard. */
     bool kicked[2] = { false, false };
     for (int k = 0; k < PB_SUB; k++) {
         for (int i = 0; i < 2; i++)
@@ -1186,14 +1224,14 @@ static void pb_phys(void)
     put(s_pb_ball, s_pb_x, s_pb_y);
 }
 
-/* 한 조각 — 공을 조금 옮기고 그 자리에서 판정한다.
- * false 면 공이 빠진 것이라 그 걸음은 거기서 끝난다. */
+/* One sub-step: move the ball a little and test where it lands.
+ * false means the ball drained, and the step ends there. */
 static bool pb_sub(const float *om, bool *kicked)
 {
     s_pb_x += s_pb_vx / PB_SUB;
     s_pb_y += s_pb_vy / PB_SUB;
 
-    /* 범퍼 — 맞으면 점수가 오르고 세게 튕겨 나간다 */
+    /* Bumpers — score and a hard kick away */
     for (int i = 0; i < PB_BUMP_N; i++) {
         float dx = s_pb_x - s_pb_bx[i], dy = s_pb_y - s_pb_by[i];
         float d2 = dx * dx + dy * dy, hit = PB_BUMP_R + PB_BR;
@@ -1210,7 +1248,7 @@ static bool pb_sub(const float *om, bool *kicked)
         break;
     }
 
-    /* 표적 — 맞으면 눕고 점수가 크다. 넷을 다 눕히면 한꺼번에 다시 선다. */
+    /* Targets — knocked flat, worth a lot. Flatten all four and they all stand back up. */
     for (int i = 0; i < PB_TGT_N; i++) {
         if (!s_pb_tup[i]) continue;
         float tdx = s_pb_x - s_pb_tx[i], tdy = s_pb_y - s_pb_ty[i];
@@ -1227,7 +1265,7 @@ static bool pb_sub(const float *om, bool *kicked)
         s_pb_pts += 50;
         int up = 0;
         for (int k = 0; k < PB_TGT_N; k++) if (s_pb_tup[k]) up++;
-        if (up == 0) {                     /* 다 눕혔다 — 보너스와 함께 다시 */
+        if (up == 0) {                     /* all down — bonus, and reset them */
             s_pb_pts += 200;
             for (int k = 0; k < PB_TGT_N; k++) {
                 s_pb_tup[k] = true;
@@ -1244,7 +1282,7 @@ static bool pb_sub(const float *om, bool *kicked)
     for (int i = 0; i < 2; i++)
         if (pb_flip_hit(i, kicked[i] ? 0.0f : om[i])) { kicked[i] = true; break; }
 
-    /* 벽 — 아래 가운데만 뚫려 있다. 거기로 내려가면 공을 잃는다. */
+    /* The wall, open only at the bottom centre. Go out there and the ball is lost. */
     float dx = s_pb_x - CX, dy = s_pb_y - CY;
     float r = sqrtf(dx * dx + dy * dy);
     if (r > PB_WALL) {
@@ -1279,7 +1317,7 @@ static void pb_step(lv_timer_t *t)
     }
 }
 
-/* 화면 왼쪽 절반이 왼 날개, 오른쪽 절반이 오른 날개. 두 손가락도 받는다. */
+/* Left half of the screen is the left flipper, right half the right. Two fingers work. */
 static void pb_touch(lv_event_t *e)
 {
     lv_event_code_t code = lv_event_get_code(e);
@@ -1309,19 +1347,22 @@ void pb_start(void)
     s_pb_x = CX + 96.0f; s_pb_y = CY - 150.0f;
     s_pb_vx = -1.2f; s_pb_vy = 0.6f;
 
-    /* 🚨 벽 그림과 판정이 어긋나 있었다(0911 지적: "부딪히는 판정이 이상").
-     * 원을 지름 424 로 잡으면 안쪽 면이 r=206 인데 공 **중심**이 거기서
-     * 멈춘다 — 반지름 6.5 짜리 공이 벽을 통째로 덮고 바깥 면까지 넘어간다.
-     * 눈에는 공이 벽을 뚫은 것으로 보인다. 안쪽 면을 공이 닿는 자리
-     * (PB_WALL + PB_BR)에 맞춘다. lv_arc 의 안쪽 면 = 크기/2 - 선굵기. */
+    /* 🚨 The drawn wall and the collision disagreed ("the bouncing is off").
+     * A circle of diameter 424 has its inner face at r=206, which is where the
+     * ball's **centre** stops — so a ball of radius 6.5 covers the wall
+     * entirely and pokes out the far side. What you see is a ball going
+     * through the wall. Put the inner face where the ball actually touches
+     * (PB_WALL + PB_BR). For lv_arc that face is size/2 - line width. */
     lv_obj_t *ring = lv_arc_create(s_root);
     lv_obj_remove_style_all(ring);
     lv_obj_remove_flag(ring, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_size(ring, PB_RING_D, PB_RING_D);
     lv_obj_center(ring);
-    /* 🚨 구멍도 보여야 한다. 360도를 다 그려 놓고 아래 가운데로만 빠지니
-     * 멀쩡한 벽을 통과해 사라지는 것처럼 보였다. 실제로 뚫린 만큼만 비운다 —
-     * 반각 = asin(구멍폭 / 벽반지름). lv_arc 는 3시가 0도, 시계방향이다. */
+    /* 🚨 The drain has to be visible too. Drawing the full 360 while only the
+     * bottom centre let the ball out made it look like it vanished through
+     * solid wall. Leave a gap exactly as wide as the opening —
+     * half-angle = asin(drain width / wall radius). lv_arc has 0 at 3 o'clock,
+     * clockwise. */
     float ga = asinf(PB_DRAIN_X / PB_WALL) / DEG2RAD;
     lv_arc_set_bg_angles(ring, (int32_t)(90.0f + ga), (int32_t)(90.0f - ga));
     lv_arc_set_value(ring, 0);
@@ -1336,9 +1377,9 @@ void pb_start(void)
     lv_obj_add_event_cb(pad, pb_touch, LV_EVENT_PRESSED, NULL);
     lv_obj_add_event_cb(pad, pb_touch, LV_EVENT_RELEASED, NULL);
 
-    /* 🚨 예전엔 큰 범퍼 셋뿐이라 판이 휑했다(0911 제보: "레벨이 너무 심플").
-     * 화면은 못 키우니 **알을 줄여 자리를 벌었다** — 공 9→6.5, 범퍼 30→21.
-     * 그 자리에 범퍼를 다섯으로 늘리고 표적 넷을 더 놨다. */
+    /* 🚨 Three big bumpers left the table bare ("the level is too simple").
+     * The screen cannot grow, so **everything shrank to make room** — ball
+     * 9 -> 6.5, bumpers 30 -> 21. That bought five bumpers and four targets. */
     static const float BX[PB_BUMP_N] = {   0, -78,  78, -46,  46 };
     static const float BY[PB_BUMP_N] = { -128, -58, -58,  26,  26 };
     static const uint32_t BC[PB_BUMP_N] = { 0xE0B33A, 0x5BD48A, 0x7FB0FF,
@@ -1350,7 +1391,7 @@ void pb_start(void)
         put(s_pb_bump[i], s_pb_bx[i], s_pb_by[i]);
     }
 
-    /* 표적 넷 — 위쪽 양옆 통로에 둘씩. 거기로 올려 보내야 맞는다. */
+    /* Four targets, two per upper lane. You have to send the ball up there to hit them. */
     static const float TX[PB_TGT_N] = { -150, -150,  150,  150 };
     static const float TY[PB_TGT_N] = {  -78,  -34,  -78,  -34 };
     for (int i = 0; i < PB_TGT_N; i++) {
@@ -1361,7 +1402,7 @@ void pb_start(void)
         put(s_pb_tgt[i], s_pb_tx[i], s_pb_ty[i]);
     }
 
-    /* 날개 둘. 쉴 때는 안쪽 아래를 보고, 올리면 위로 친다. */
+    /* Two flippers: resting they point down and inward; raised they hit up. */
     s_flip[0] = (pb_flip_t){ CX - PB_FLIP_PX, CY + PB_FLIP_PY,  24.0f, -34.0f,  24.0f, false };
     s_flip[1] = (pb_flip_t){ CX + PB_FLIP_PX, CY + PB_FLIP_PY, 156.0f, 214.0f, 156.0f, false };
     for (int i = 0; i < 2; i++) {
@@ -1377,15 +1418,15 @@ void pb_start(void)
     s_pb_ball = dot(s_root, (int)(PB_BR * 2), 0xFFFFFF);
     put(s_pb_ball, s_pb_x, s_pb_y);
     s_score = make_score();
-    /* 🚨 공용 점수 자리(+168)는 두 날개 사이 — 공이 빠지는 바로 그 자리다.
-     * 글자가 구멍을 가리면 언제 빠지는지 안 보인다. 위로 올린다. */
+    /* 🚨 The shared score position (+168) sits between the flippers — exactly
+     * where the ball drains. Text over the drain hides the moment you lose it. */
     lv_obj_align(s_score, LV_ALIGN_CENTER, 0, 116);
     lv_label_set_text_fmt(s_score, "0  o%d", s_pb_left);
     add_back_xy(do_back, -GBTN_IN_DX, GBTN_IN_DY);
     arm_start(pb_step, 20);
 }
 
-/* 검증용 — 핀볼을 곧바로 굴린다 */
+/* For tests — start pinball directly */
 void games_debug_play_pinball(void)
 {
     clear_board();
@@ -1397,7 +1438,7 @@ void games_debug_play_pinball(void)
     s_loop = lv_timer_create(pb_step, 20, NULL);
 }
 
-/* 검증용 — 공 자리와 남은 개수 */
+/* For tests — where the ball is and how many are left */
 void pb_debug(float *x, float *y, int *pts, int *left)
 {
     if (x)    *x    = s_pb_x;
@@ -1406,19 +1447,20 @@ void pb_debug(float *x, float *y, int *pts, int *left)
     if (left) *left = s_pb_left;
 }
 
-/* ── 메뉴 ────────────────────────────────────────────────────── */
+/* ── menu ────────────────────────────────────────────────────── */
 
 static int s_pick;
 
 static void do_pick(void)
 {
     clear_board();
-    /* 게임(벽돌·구슬·뽁뽁이)은 화면 전체가 조작면이라 손잡이가 조작을 뺏는다.
-     * 물·달·지구는 아래쪽이 비어 있어서 손잡이를 남겨도 안 걸린다 —
-     * 오히려 없으면 홈으로 나갈 길이 PWR 뿐이라 불편하다. */
-    launcher_handle_show(false);   /* 게임은 화면 전체가 조작면이다 */
+    /* In the games (bricks, marble, bubble wrap) the whole screen is the
+     * control surface, so the handle would steal input. Water and the planets
+     * leave the bottom empty, so the handle can stay — and without it the only
+     * way home would be the power button, which is worse. */
+    launcher_handle_show(false);   /* games own the whole screen */
     switch (s_pick) {
-        /* 메뉴에서 고르면 1단계부터, 기체도 새로 */
+        /* Chosen from the menu: level 1, and a fresh set of balls */
         case 0: s_level = 0; s_brk_life = BRK_LIVES; brk_start(); break;
         case 1: pb_start();   break;
         case 2: maze_start(); break;
@@ -1428,17 +1470,18 @@ static void do_pick(void)
 
 static void pick_cb(lv_event_t *e)
 {
-    /* 여기서 바로 판을 갈아엎으면 지금 눌린 그 버튼이 해제된다 → defer */
+    /* Rebuilding here would free the very button being pressed -> defer */
     s_pick = (int)(intptr_t)lv_event_get_user_data(e);
     defer(do_pick);
 }
 
 
-/* ── 뽁뽁이 ──────────────────────────────────────────────────
- * 피젯 토이. 이 배지를 상시 켜두는 디지털 명찰로 쓰면 배터리가 못 버틴다
- * (화면이 제일 많이 먹는다). 그래서 "잠깐 꺼내 만지작거리다 넣는" 쓰임을
- * 노렸다. 점수도 규칙도 없다 — 누르면 터지고, 다 터지면 다시 찬다.
- * 타이머는 10Hz 하나뿐이고 하는 일은 화면이 꺼졌나 보는 게 전부다. */
+/* ── bubble wrap ─────────────────────────────────────────────
+ * A fidget toy. Leaving this badge on as a digital name tag does not survive
+ * the battery (the display is most of the draw), so the shape this aims for
+ * is "take it out, fiddle, put it away". No score and no rules — press one
+ * and it pops, pop them all and they come back.
+ * One 10 Hz timer, and all it does is check whether the display went off. */
 static uint32_t pop_rnd(void)
 {
     s_pop_seed ^= s_pop_seed << 13;
@@ -1488,12 +1531,12 @@ static void pop_cb(lv_event_t *e)
     s_pop_left--;
     pop_face(i, true);
     pop_paint_count();
-    /* 진짜 뽁뽁이도 방울마다 소리가 조금씩 다르다 */
+    /* Real bubble wrap does not sound the same twice either */
     blip(760 + (pop_rnd() % 620), 22);
-    if (s_pop_left == 0) s_refill_in = 7;    /* 0.8초쯤 뒤 다시 찬다 */
+    if (s_pop_left == 0) s_refill_in = 7;    /* refill in about 0.8 s */
 }
 
-/* 길게 누르면 다 터뜨리지 않아도 새로 찬다 */
+/* Hold to refill without popping them all */
 static void pop_long_cb(lv_event_t *e)
 {
     (void)e;
@@ -1502,18 +1545,18 @@ static void pop_long_cb(lv_event_t *e)
 
 static void pop_step(lv_timer_t *t)
 {
-    /* 🔋 화면이 꺼졌는데 10Hz 로 계속 깨어날 이유가 없다. 느리게 돌린다.
-     * (앱 타이머는 화면이 꺼져도 멈추지 않는다 — 직접 늦춰야 한다.) */
+    /* 🔋 No reason to wake at 10 Hz behind a dark screen. Slow down.
+     * (App timers keep running with the display off — you have to do this.) */
     if (launcher_screen_is_off()) {
         port_tone_enable(false);
         port_tone_hold(false);
-        /* 🚨 주기를 바꾸면 lv_timer_handler 가 무한히 다시 돈다(0909).
-         * 주기는 그대로 두고 16번에 한 번만 일한다. */
+        /* 🚨 Changing the period makes lv_timer_handler restart forever.
+         * Leave it and act on every 16th call instead. */
         static uint8_t skip;
         if (++skip % 16) return;
         return;
     }
-    port_tone_hold(true);        /* 이미 열려 있으면 하는 일이 없다 */
+    port_tone_hold(true);        /* does nothing if it is already open */
     if (s_refill_in > 0 && --s_refill_in == 0) pop_refill();
 }
 
@@ -1529,7 +1572,7 @@ void pop_start(void)
     lv_obj_add_flag(field, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(field, pop_long_cb, LV_EVENT_LONG_PRESSED, NULL);
 
-    /* 육각으로 깔면 둥근 화면이 고르게 찬다. 줄마다 반 칸씩 민다. */
+    /* A hex layout fills a round screen evenly. Every other row shifts half a cell. */
     const int step_x = POP_D + 4, step_y = 70;
     for (int row = -2; row <= 2 && s_pop_n < POP_MAX; row++) {
         int y = CY + row * step_y;
@@ -1546,7 +1589,7 @@ void pop_start(void)
             lv_obj_add_flag(b, LV_OBJ_FLAG_CLICKABLE);
             s_pop[s_pop_n] = b;
             s_popped[s_pop_n] = 0;
-            /* 누르는 순간 터져야 손맛이 산다 — 떼는 걸 안 기다린다 */
+    /* Popping on press, not on release, is what makes it feel right */
             lv_obj_add_event_cb(b, pop_cb, LV_EVENT_PRESSED, (void *)(intptr_t)s_pop_n);
             pop_face(s_pop_n, false);
             lv_obj_set_pos(b, x - POP_D / 2, y - POP_D / 2);
@@ -1561,8 +1604,9 @@ void pop_start(void)
     lv_obj_align(s_pop_lbl, LV_ALIGN_CENTER, 0, 196);
     pop_paint_count();
 
-    /* 🚨 넷 중 여기만 뒤로가기가 없었다(0911 지적). 나머지 셋은 add_back 을
-     * 부르는데 이 함수만 빠져 있었다 — 눈으로는 안 보이는 종류의 누락이다. */
+    /* 🚨 This was the one of the four with no back button. The other three
+     * call add_back and this function simply did not — the kind of omission
+     * you cannot see by looking. */
     add_back();
 
     s_loop = lv_timer_create(pop_step, 120, NULL);
@@ -1570,8 +1614,9 @@ void pop_start(void)
 
 static void show_menu(void)
 {
-    /* 둥근 화면이라 세로로 길게 늘어놓으면 위아래가 잘린다. 2열 격자가 맞다. */
-    /* 게임만 남긴다. 물·천체는 홈에서 바로 여는 제 앱이 됐다. */
+    /* A tall list gets clipped top and bottom on a round screen. Rows of two fit.
+     * Only the games are listed — water and the planets became their own apps
+     * on the home screen. */
     static const char *NAME[4] = { "Bricks", "Pinball", "Marble", "Pop" };
     static const uint32_t COL[4] = { 0x2E6E5A, 0x6E2E4A, 0x6E5A2E, 0x4A3A6E };
 
@@ -1579,20 +1624,21 @@ static void show_menu(void)
     lv_label_set_text(t, "Games");
     lv_obj_set_style_text_font(t, &lv_font_montserrat_20, 0);
     lv_obj_set_style_text_color(t, lv_color_hex(0x8A8A90), 0);
-    /* 🚨 단추를 넷으로 늘리면서 첫 단추가 -135(y 63~133) 로 올라왔다. 제목이
-     * -158(y 75) 이면 그 뒤에 깔려 아예 안 보인다(0911 시뮬 그림에서 발견).
-     * -196 은 y 37, 그 자리의 폭이 252px 이라 글자가 안 잘린다. */
+    /* 🚨 Going to four buttons moved the first one up to -135 (y 63..133).
+     * The title at -158 (y 75) ended up behind it and vanished completely,
+     * which only showed up in a simulator screenshot.
+     * -196 is y 37, where the circle is 252 px wide, so nothing is clipped. */
     lv_obj_align(t, LV_ALIGN_CENTER, 0, -196);
 
-    /* 🚨 넷으로 늘렸다. 둥근 화면이라 y=±172 에서 쓸 수 있는 폭이 314px 다 —
-     * 단추를 260 으로 줄여야 모서리가 안 잘린다. */
+    /* 🚨 Four now. On a round screen y=±172 leaves 314 px of usable width, so
+     * the buttons have to come down to 260 or their corners get cut. */
     for (int i = 0; i < 4; i++) {
         lv_obj_t *b = lv_button_create(s_root);
         lv_obj_set_size(b, 260, 70);
         lv_obj_set_style_radius(b, 35, 0);
         lv_obj_set_style_bg_color(b, lv_color_hex(COL[i]), 0);
         lv_obj_set_style_shadow_width(b, 0, 0);
-        /* 3줄 x 2칸. 가운데 줄이 제일 넓으니 바깥으로 조금 더 벌린다. */
+        /* Three rows of two. The middle row is widest, so it spreads a little further out. */
         lv_obj_align(b, LV_ALIGN_CENTER, 0, -135 + i * 90);
         lv_obj_add_event_cb(b, pick_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
         lv_obj_t *l = lv_label_create(b);
@@ -1615,32 +1661,34 @@ static void enter(lv_obj_t *root)
 
 static void leave(void)
 {
-    s_defer_fn = NULL;      /* 미뤄둔 전환이 남으면 지워진 판을 밟는다 */
+    s_defer_fn = NULL;      /* a pending switch would land on a deleted board */
     launcher_handle_show(true);
     stop_loop();
     water_stop();
     orb_stop();
     port_tone_enable(false);
-    port_tone_hold(false);   /* 나가면 코덱을 놓는다 */
+    port_tone_hold(false);   /* let the codec go on the way out */
     s_root = NULL;
 }
 
 static lv_color_t tint(void) { return lv_color_hex(0x7FB0FF); }
 
-/* ── 홈에서 바로 들어가는 문 ─────────────────────────────────
- * 물과 천체는 게임 메뉴를 거치지 않고 홈에서 바로 연다.
- * 판은 같은 것을 쓴다 — 코드가 두 벌이 되면 한쪽만 고치는 사고가 난다. */
+/* ── doors straight from home ────────────────────────────────
+ * Water and the planets open from the home screen without going through the
+ * games menu. They use the same board — two copies of this would mean fixing
+ * one of them and not the other. */
 static void enter_water(lv_obj_t *root)
 {
-    enter(root);              /* 판을 세운다(메뉴가 그려진다) */
-    lv_obj_clean(s_root);     /* 메뉴는 걷어낸다 */
+    enter(root);              /* build the board (this draws the menu) */
+    lv_obj_clean(s_root);     /* then take the menu away */
     launcher_handle_show(true);
     s_loop = water_start(s_root);
 }
 
-/* ── 천체 ────────────────────────────────────────────────────
- * 다섯을 골라 본다. 앱을 다섯 개로 늘리면 홈이 붐비고, 그림·표는 어차피
- * 하나뿐이라 나눌 이유가 없다. 고른 것은 기억해서 다음에 그대로 연다. */
+/* ── the planets ─────────────────────────────────────────────
+ * Pick one of five. Five separate apps would crowd the home screen, and there
+ * is only one renderer and one table anyway. The choice is remembered and
+ * opens straight into it next time. */
 static orb_kind_t s_orb_pick = ORB_MOON;
 
 static void orb_go(lv_event_t *e)
@@ -1654,8 +1702,8 @@ static void do_orb(void)
     lv_obj_clean(s_root);
     launcher_handle_show(true);
     s_loop = orb_start(s_root, s_orb_pick);
-    /* 🚨 고르는 화면으로 되돌아갈 데가 있는데 문이 없었다(0911 지적).
-     * 게임과 같은 자리에 같은 모양으로 두되, 돌아갈 곳은 **천체 목록**이다. */
+    /* 🚨 There was somewhere to go back to and no door to it. Same place and
+     * same shape as in the games, but back here means **the planet list**. */
     add_back_to(do_orb_back);
 }
 
@@ -1667,12 +1715,12 @@ static void orb_menu(void)
     lv_obj_set_style_text_color(t, lv_color_hex(0x8A8A90), 0);
     lv_obj_align(t, LV_ALIGN_CENTER, 0, -172);
 
-    /* 천체마다 제 빛깔로. 무엇인지 글자 없이도 대충 안다. */
+    /* Each one in its own colour, so you know which is which without reading. */
     static const uint32_t COL[ORB_N] = {
-        0x4A4A52,   /* 달   회색 */
-        0x2A5A7E,   /* 지구 파랑 */
-        0x8A5A18,   /* 태양 주황 */
-        0x7A5A3A,   /* 목성 갈색 */
+        0x4A4A52,   /* Moon    grey   */
+        0x2A5A7E,   /* Earth   blue   */
+        0x8A5A18,   /* Sun     orange */
+        0x7A5A3A,   /* Jupiter brown  */
     };
     for (int i = 0; i < ORB_N; i++) {
         lv_obj_t *b = lv_button_create(s_root);

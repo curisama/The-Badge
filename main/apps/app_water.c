@@ -1,48 +1,55 @@
-/* 물 — 진짜 입자 유체. 배 한 척 띄웠다.
+/* Water — an actual particle fluid, with a boat on it.
  *
- * 🚨 세 번 엎었다.
- *   1) 고정 사인파를 기울인 판에 얹었다 → 판때기였다.
- *   2) 정상파 두 개를 흉내냈다 → 통을 어떻게 흔들든 정해진 모양뿐이었다.
- *   3) 얕은 물 방정식(가로 칸마다 높이 하나) → 물리는 맞았지만 여전히
- *      "파형"이었다. 한 x 에 y 가 하나뿐이라 방울도, 말려 덮치는 파도도,
- *      떨어져 나온 덩어리도 구조적으로 표현할 자리가 없다. 높이함수인 한
- *      아무리 방정식을 고쳐도 물이 될 수 없다.
+ * 🚨 Three attempts were thrown away before this one.
+ *   1) fixed sine waves on a tilted plane -> a sheet of cardboard
+ *   2) two standing waves mixed -> however you shook it, the same shape
+ *   3) shallow-water equations (one height per column) -> the physics was
+ *      right and it was still a *waveform*. With one y per x there is
+ *      structurally nowhere to put a droplet, a breaking wave, or a blob
+ *      that has come away. As long as it is a height field, no amount of
+ *      fixing the equations makes it water.
  *
- * 그래서 물을 입자로 만든다. 620개의 물방울이 서로 밀치며 통 안에서 논다.
- * 방울·파도·덩어리·튀김이 따로 만든 게 아니라 전부 같은 입자에서 나온다.
+ * So the water is made of particles. Several hundred droplets push each other
+ * around inside the bowl. Droplets, waves, blobs and splashes are not
+ * separate features — they all fall out of the same particles.
  *
- * 방법은 PBF(Position Based Fluids)다. 힘이 아니라 위치를 직접 고친다:
- *   1. 중력으로 일단 옮겨 본다
- *   2. 이웃을 세어 밀도를 잰다 — 너무 빽빽하면 서로 밀어내고, 성기면 당긴다
- *   3. 그 보정을 두세 번 반복해 밀도를 고르게 맞춘다
- *   4. 실제로 움직인 거리에서 속도를 되뽑는다
- * 힘으로 밀면 시간 간격이 조금만 커져도 터지는데, 위치를 고치는 방식은
- * 안 터진다. 실시간 유체에 이 방식을 쓰는 이유다.
+ * The method is PBF (position based fluids): correct positions directly
+ * rather than applying forces.
+ *   1. move everything under gravity
+ *   2. count neighbours to measure density — too dense and they push apart,
+ *      too sparse and they pull together
+ *   3. repeat that correction two or three times until the density is even
+ *   4. recover velocity from how far things actually moved
+ * Forces blow up as soon as the timestep grows slightly; correcting positions
+ * does not. That is why real-time fluids are written this way.
  *
- * 비용: 입자 620개 x 이웃 12개 x 3회 ≈ 프레임당 25만 번. 240MHz 면 감당된다.
- * 이웃 찾기는 격자로 나눠 제 칸과 이웃 칸만 본다 — 전부 대보면 620x620 이다.
+ * Cost: particles x about twelve neighbours x three passes, which is a few
+ * hundred thousand operations a frame. At 240 MHz that fits. Neighbours are
+ * found through a grid — each particle looks at its own cell and the eight
+ * around it. Testing every pair would be N squared.
  *
- * 🚨 그림은 466x466 RGB565 버퍼(434KB, PSRAM)에 우리가 직접 찍어 한 장으로
- * 넘긴다. 0909 에 바꿨다 — 그 전에는 "LVGL 이 16줄 밴드를 그릴 때 끼어들어
- * 그 안에만 그린다" 였는데, 밴드가 30개라 콜백이 프레임당 30번 불리고 그때마다
- * 466열을 훑어 lv_draw_rect 를 2만 번 넘게 불렀다. 프레임 간격 311ms(초당
- * 3장)의 정체가 그것이었고, 그 느린 프레임이 물리의 한 걸음을 33ms 로 키워
- * 물을 통째로 위로 날려버렸다.
+ * 🚨 The picture is drawn by us into a 466x466 RGB565 buffer (434 KB, PSRAM)
+ * and handed over as one image. Before that it hooked into LVGL's 16-line
+ * bands and drew inside each one — thirty bands meant thirty callbacks a
+ * frame, each walking 466 columns and calling lv_draw_rect more than twenty
+ * thousand times. That was the 311 ms frame interval (3 fps), and those slow
+ * frames stretched a physics step to 33 ms, which threw the water out of the
+ * bowl entirely.
  *
- * 🚨 예전 주석은 "PSRAM 캔버스는 0908 에 그리기가 13,943번 실패한 그 함정"
- * 이라며 이 방식을 금지했다. 그 함정은 이것과 다르다 — 그때 문제는 LVGL 의
- * **그리기 버퍼**를 PSRAM 에 둬서 SPI 가 DMA 를 못 하고 전송마다 내부 바운스
- * 버퍼를 잡다 실패한 것이다. 이 그림은 화면으로 밀어내는 버퍼가 아니라 CPU 가
- * 읽는 **원본**이다. LVGL 이 여기서 읽어 16줄짜리 내부 RAM 버퍼에 옮기고,
- * DMA 는 그 내부 버퍼에서 나간다 — DMA 경로는 하나도 안 바뀐다.
- */
+ * 🚨 An older comment forbade this, calling a PSRAM canvas "the trap that
+ * failed 13,943 draws". That trap is a different thing: there, LVGL's **draw
+ * buffer** was in PSRAM, so SPI could not DMA from it and every transfer had
+ * to allocate an internal bounce buffer. This image is not pushed to the
+ * panel — it is the **source** the CPU reads. LVGL copies from here into a
+ * 16-line internal RAM buffer and DMA runs from that. The DMA path is
+ * unchanged. */
 #include "app.h"
 #include "port.h"
 #include "water.h"
 #include <math.h>
 #include <string.h>
 #ifdef BADGE_SIM
-/* 시뮬엔 PSRAM 도 esp_timer 도 없다. 같은 이름으로 대체를 둔다. */
+/* The simulator has neither PSRAM nor esp_timer. Stand-ins under the same names. */
 #  include <stdlib.h>
 #  include <stdio.h>
 #  include <sys/time.h>
@@ -70,53 +77,58 @@ static int64_t esp_timer_get_time(void)
 
 #define CX      233
 #define CY      233
-#define R       222         /* 물이 담기는 원 */
+#define R       222         /* the circle the water sits in */
 #define DEG2RAD 0.0174533f
 
-/* ── 입자 ────────────────────────────────────────────────────
- * 620개로 반원을 채우면 간격이 11px 쯤 된다. 이웃 반경은 그 두 배로 잡아야
- * 서로를 충분히 느낀다 — 좁으면 물이 아니라 모래처럼 흩어진다. */
-/* 🚨 620 → 460 으로 줄였던 것을 되돌린다(0909). 줄인 이유는 물리가 프레임을
- * 잡아먹어서였는데, 이제 물리가 코어1 로 가서 그리기와 겹쳐 돈다 — 프레임에
- * 안 붙는다. 위 주석의 "620개로 반원을 채우면 간격이 11px" 이 원래 설계다. */
-/* 🚨 입자 수가 곧 물리 값이다 — 비용이 입자 수의 제곱에 비례한다(각 입자가
- * 이웃을 보는데, 같은 통에 입자가 늘면 이웃도 같이 는다). 0909 실측:
- *     620개 → 걸음 하나 27ms.  실시간엔 걸음 8개, 즉 216ms 가 든다.
- * 코어1 예산은 프레임(80ms) 만큼이라 620개로는 걸음을 1~2개밖에 못 넣는다 —
- * 그게 슬로모션의 정체다. 380개면 걸음 하나가 9ms 라 8개가 예산에 들어간다.
- * 대신 점성을 0.22 로 올려 덩어리감은 지켰다. */
+/* ── particles ───────────────────────────────────────────────
+ * Filling the half-circle with this many leaves them about 11 px apart. The
+ * neighbour radius has to be twice that for them to feel each other properly
+ * — too tight and it behaves like sand, not water. */
+/* 🚨 The count was cut from 620 to 460 and then put back. The cut was made
+ * because the physics was eating the frame, and the physics has since moved
+ * to core 1 where it overlaps with drawing — it is no longer in the frame at
+ * all. */
+/* 🚨 The particle count *is* a physics parameter: cost grows with the square
+ * of it, because more particles in the same bowl means more neighbours each.
+ * Measured: 620 particles -> 27 ms per step, and real time needs eight steps,
+ * i.e. 216 ms. The core-1 budget is one frame (80 ms), so at 620 only one or
+ * two steps fit — which is what the slow motion was. At 380 a step is 9 ms
+ * and all eight fit. Viscosity went up to 0.22 to keep the sense of body. */
 #define NP      380
-#define HR      22.0f                   /* 이웃 반경 */
+#define HR      22.0f                   /* neighbour radius */
 #define INV_HR  (1.0f / HR)
 #define HR2     (HR * HR)
 
-/* 🚨 이걸 static 으로 두면 앱을 안 켜도 내부 RAM 27KB 를 상시 물고 있다
- * (내부 RAM 은 통틀어 116KB 다). 들어올 때 PSRAM 에서 잡고 나갈 때 놓는다.
- * PSRAM 이어도 되는 이유는 이게 화면으로 밀어내는 버퍼가 아니라 CPU 가
- * 읽고 쓰는 데이터라서다 — DMA 함정과는 상관없다. */
-static float *s_x, *s_y;                /* 지금 위치 — 물리가 쓴다 */
-static float *s_px, *s_py;              /* 옮기기 전 위치 */
+/* 🚨 Declaring these static would hold 27 KB of internal RAM permanently,
+ * whether or not the app is open — and there are only 116 KB of it. They are
+ * allocated from PSRAM on entry and freed on exit.
+ * PSRAM is fine here because this is data the CPU reads and writes, not a
+ * buffer pushed to the panel — it has nothing to do with the DMA trap. */
+static float *s_x, *s_y;                /* current positions — the physics writes these */
+static float *s_px, *s_py;              /* positions before the move */
 static float *s_vx, *s_vy;
 
-/* 🚨 그리기가 보는 사본. 물리가 코어1 에서 도는 동안 코어0 이 이걸 읽는다 —
- * 같은 배열을 한쪽이 쓰는 중에 다른 쪽이 읽으면 화면이 찢어지거나 죽는다.
- * 한 판이 끝난 자리에서만 베끼므로 그 사이에 아무도 안 건드린다.
- * 시뮬엔 코어가 하나뿐이라 그냥 같은 자리를 가리킨다(베끼지 않는다). */
+/* 🚨 The copy the renderer reads. While the physics runs on core 1, core 0
+ * reads this — reading the same array another core is writing either tears
+ * the picture or crashes. The copy is taken at the one point where a step has
+ * finished and nothing is touching them.
+ * The simulator has one core, so it just points at the same arrays. */
 static float *s_rx, *s_ry, *s_rvx, *s_rvy;
 
-/* ── 물리를 코어1 로 ──────────────────────────────────────────
- * 🚨 코어가 둘인데 무거운 건 전부 코어0 에 몰려 있었다(메인도 BLE 도 CPU0).
- * 물리는 그리기와 아무 상관 없는 계산이라 옆으로 빼면 프레임에서 통째로
- * 빠진다. 0909 실측 110ms 중 입자가 37ms 였다.
+/* ── physics on core 1 ────────────────────────────────────────
+ * 🚨 There are two cores and everything heavy was on core 0 (main and BLE
+ * both). The physics has nothing to do with drawing, so moving it sideways
+ * takes it out of the frame entirely — of a measured 110 ms frame, 37 ms was
+ * particles.
  *
- * 겹치는 방식: 코어0 이 N 판을 그리는 동안 코어1 이 N+1 판을 푼다.
- *   1. 지난 판이 끝나기를 기다린다(done)
- *   2. 그 자리에서 사본을 뜬다 — 이때는 아무도 안 건드린다
- *   3. 다음 판 조건을 넘기고 go 를 준다
- *   4. 코어0 은 사본으로 그린다
- * 🚨 사본 없이 같은 배열을 읽으면 한쪽이 쓰는 중에 읽어 화면이 찢어진다.
- * 🚨 나갈 때 반드시 판이 끝난 걸 보고 배열을 놓아야 한다. 거꾸로 하면
- *    코어1 이 이미 놓은 자리를 만진다. */
+ * How they overlap: while core 0 draws step N, core 1 solves step N+1.
+ *   1. wait for the previous step to finish (done)
+ *   2. take the copy right there, while nothing is touching it
+ *   3. hand over the conditions for the next step and signal go
+ *   4. core 0 draws from the copy
+ * 🚨 Reading the live arrays without the copy tears the picture.
+ * 🚨 On the way out, confirm the step has finished before freeing the arrays.
+ *    The other order has core 1 writing into memory that is already gone. */
 static struct {
     float gx, gy, kx, ky, burst, sdt;
     int   sub;
@@ -126,9 +138,9 @@ static volatile bool s_still_flag;
 static void fluid_step(float dt, float gx, float gy);
 static bool water_is_still(void);
 
-/* 한 판. 어느 코어에서 불리든 같은 일을 한다. */
-static volatile uint32_t s_phys_us;   /* 지난 판이 걸린 시간 */
-static volatile int      s_phys_sub;  /* 그때 돈 걸음 수 */
+/* One step. Does the same thing whichever core calls it. */
+static volatile uint32_t s_phys_us;   /* how long the last step took */
+static volatile int      s_phys_sub;  /* and how many sub-steps it ran */
 
 static void phys_round(void)
 {
@@ -139,7 +151,7 @@ static void phys_round(void)
             s_vx[i] += s_pin.kx;
             s_vy[i] += s_pin.ky;
             if (s_pin.burst > 0) {
-                /* 정면으로 찌르면 방향이 없다 — 알갱이마다 아무 쪽으로 튄다 */
+                /* A dead-centre poke has no direction — scatter each one somewhere */
                 seed = seed * 1103515245u + 12345u;
                 float a = (float)((seed >> 9) & 0xFFFF) / 65535.0f * 6.2831853f;
                 s_vx[i] += cosf(a) * s_pin.burst;
@@ -168,11 +180,11 @@ static void phys_task(void *arg)
     }
 }
 
-/* 돌고 있는 판이 끝나기를 기다린다. 나갈 때도 이걸 먼저 부른다. */
+/* Wait for the running step to finish. Called first on the way out, too. */
 static void phys_wait(void)
 {
     if (!s_inflight) return;
-    /* 🚨 넉넉히 기다리되 영원히는 아니다. 코어1 이 막히면 화면까지 멎는다. */
+    /* 🚨 Wait generously, but not forever. A stuck core 1 would freeze the display. */
     xSemaphoreTake(s_done, pdMS_TO_TICKS(1000));
     s_inflight = false;
 }
@@ -180,29 +192,31 @@ static void phys_wait(void)
 static void phys_wait(void) { }
 #endif
 
-/* 이웃 찾기용 격자 — 제 칸과 둘레 8칸만 본다 */
-#define GC      24                      /* 한 변의 칸 수 */
-#define GS      (466.0f / GC)            /* 칸 크기(≈19px) */
-static uint16_t s_head[GC * GC];        /* 칸마다 첫 입자 (0xFFFF = 빈칸) — 1.1KB 라 남겨둔다 */
-static uint16_t *s_next;                /* 같은 칸의 다음 입자 */
+/* The neighbour grid — each particle looks at its own cell and the eight around it */
+#define GC      24                      /* cells per side */
+#define GS      (466.0f / GC)            /* cell size (about 19 px) */
+static uint16_t s_head[GC * GC];        /* first particle per cell (0xFFFF = empty) — 1.1 KB, kept static */
+static uint16_t *s_next;                /* next particle in the same cell */
 
 static lv_obj_t   *s_root, *s_field, *s_hint;
 static lv_timer_t *s_loop;
-static float s_gx, s_gy;                /* 중력 방향(화면 좌표) */
+static float s_gx, s_gy;                /* which way gravity points, in screen coordinates */
 static float s_boat_x, s_boat_vx;
 static float s_boat_y, s_boat_vy;
-/* 중력 방향의 단위벡터. 물·배·그리기가 같은 '아래' 를 봐야 한다. */
+/* Unit vector along gravity. Water, boat and renderer all have to agree on "down". */
 static float s_gux = 0.0f, s_guy = 1.0f;
 
-/* 화면 좌표 ↔ '중력이 아래인 틀'. 배를 돌려 태우려고 둔다.
- * A = 중력 방향(아래가 +), C = 그 직각 방향. 중력이 화면 아래면 그대로다. */
+/* Screen coordinates <-> a frame where gravity is down. This is what lets the
+ * boat ride at an angle. A = along gravity (down is +), C = perpendicular to
+ * it. With gravity straight down the screen, they are the identity. */
 #define G_ALONG(px, py)  (((px) - CX) * s_gux + ((py) - CY) * s_guy)
 #define G_CROSS(px, py)  (((px) - CX) * s_guy - ((py) - CY) * s_gux)
 static float s_fake_gx, s_fake_gy;
 static uint32_t s_last_ms;
 
-/* ── 이웃 격자 ─────────────────────────────────────────────
- * 전부 대보면 620x620 이다. 칸으로 나눠 제 칸과 둘레 8칸만 본다. */
+/* ── the neighbour grid ────────────────────────────────────
+ * Testing every pair is N squared. Split the area into cells and look only at
+ * your own cell and the eight around it. */
 static void grid_build_from_current(void)
 {
     memset(s_head, 0xFF, sizeof s_head);
@@ -218,7 +232,7 @@ static void grid_build_from_current(void)
     }
 }
 
-/* 통 안으로 되돌린다 */
+/* Put it back inside the bowl */
 static inline void clamp_circle(float *x, float *y)
 {
     float dx = *x - CX, dy = *y - CY;
@@ -231,33 +245,39 @@ static inline void clamp_circle(float *x, float *y)
     }
 }
 
-/* ── 물 한 걸음 ─────────────────────────────────────────────
- * 🚨 처음엔 PBF 의 정석 커널(poly6/spiky)로 짰는데, 완화 상수의 스케일이
- * 우리 단위(픽셀)와 안 맞아 보정이 사실상 0 이 됐다 — 입자가 바닥에
- * 눌러앉아 얇게 깔렸다(0909 실측). 상수를 맞추는 게 까다로운 방식이다.
+/* ── one water step ────────────────────────────────────────
+ * 🚨 This was first written with the textbook PBF kernels (poly6/spiky), but
+ * the relaxation constant's scale did not match our units (pixels) and the
+ * correction came out as effectively zero — the particles settled into a thin
+ * layer on the bottom. Getting those constants right is fiddly.
  *
- * 그래서 이중 밀도 완화(Clavet)로 간다. 게임용으로 만들어진 방식이라
- * 스케일에 둔감하고 안 터진다. 두 가지 밀도를 쓴다:
- *   ρ      보통 밀도 — 기준보다 빽빽하면 밀어내고 성기면 당긴다(표면장력)
- *   ρ_near 아주 가까운 것만 세는 밀도 — 절대 겹치지 않게 밀기만 한다
- * 두 번째가 있어야 입자가 한 점에 뭉쳐 무너지지 않는다. */
-#define KSTIFF   26000.0f       /* 보통 밀도의 세기 */
-#define KNEAR    78000.0f       /* 가까운 밀도의 세기 — 겹침을 막는다 */
-static float s_rho0;            /* 잔잔할 때의 밀도 */
+ * So it uses double density relaxation (Clavet) instead. That was designed
+ * for games: it is insensitive to scale and it does not blow up. Two
+ * densities are tracked:
+ *   rho      ordinary density — denser than the rest pushes apart, sparser
+ *            pulls together (this is the surface tension)
+ *   rho_near counts only very close neighbours and only ever pushes
+ * The second one is what stops particles collapsing onto a single point. */
+#define KSTIFF   26000.0f       /* strength of the ordinary density term */
+#define KNEAR    78000.0f       /* strength of the near term — prevents overlap */
+static float s_rho0;            /* the density when it is at rest */
 
-/* 🚨 이웃을 두 번 훑고 있었다. 한 번은 밀도를 세고, 한 번은 그 힘으로 민다.
- * 그런데 그 사이에 자리를 바꾸는 것이 아무도 없다 — 내 몫(dxi)은 끝에 한 번에
- * 더하고, 이웃 j 는 이 입자를 도는 동안 한 번씩만 만진다. 그러니 두 번째
- * 훑기가 다시 구하는 dx·dy·r 은 첫 번째와 **글자 그대로 같은 값**이다.
- * 첫 훑기에서 담아두고 두 번째는 그것만 본다. 이웃은 입자당 스무 개 남짓이라
- * 담아두는 값이 싸다. sqrtf 가 절반, 격자 훑기도 절반이 된다.
- * 수식은 그대로다 — 시뮬에서 400프레임 지문이 같은지로 확인한다. */
-#define NB_MAX 128        /* 한 입자가 보는 이웃 상한. 넘으면 알려준다 */
+/* 🚨 The neighbours were being walked twice: once to count density, once to
+ * push using it. But nothing moves in between — this particle's own
+ * correction (dxi) is added once at the end, and each neighbour j is touched
+ * once per particle. So the dx, dy and r the second pass recomputes are
+ * **literally the same numbers** as the first pass.
+ * They are stored during the first walk and the second pass just reads them.
+ * A particle sees about twenty neighbours, so storing them is cheap. It
+ * halves the sqrtf calls and halves the grid walking.
+ * The maths is unchanged — verified by checking that 400 frames in the
+ * simulator produce an identical fingerprint. */
+#define NB_MAX 128        /* most neighbours one particle will track; it says so if exceeded */
 
 static void neighbors_relax(float dt)
 {
-    /* 🚨 스택이 아니라 파일 정적에 둔다. 물리는 코어1 태스크 하나만 돌리므로
-     * 안전하고, 태스크 스택을 1.8KB 더 먹지 않는다. */
+    /* 🚨 File statics, not stack. Only the one core-1 task runs the physics,
+     * so it is safe, and it keeps 1.8 KB off that task's stack. */
     static uint16_t nb_j[NB_MAX];
     static float    nb_q[NB_MAX], nb_ux[NB_MAX], nb_uy[NB_MAX];
 
@@ -267,7 +287,7 @@ static void neighbors_relax(float dt)
         int cx = (int)(s_x[i] / GS), cy = (int)(s_y[i] / GS);
         int nb = 0;
 
-        /* ── 훑기 하나 — 밀도를 세면서 이웃을 담는다 ───────── */
+        /* ── first walk: count density and collect the neighbours ── */
         for (int oy = -1; oy <= 1; oy++) {
             int yy = cy + oy;
             if (yy < 0 || yy >= GC) continue;
@@ -279,8 +299,9 @@ static void neighbors_relax(float dt)
                     float dx = s_x[j] - s_x[i], dy = s_y[j] - s_y[i];
                     float r2 = dx * dx + dy * dy;
                     if (r2 >= HR2 || r2 < 1e-4f) continue;
-                    /* 🚨 나눗셈은 Xtensa 에서 20사이클쯤 한다. HR 은 상수라
-                     * 곱셈으로 바꾸고, 1/r 은 한 번만 구해 두 축에 나눠 쓴다. */
+                    /* 🚨 Division is about twenty cycles on Xtensa. HR is
+                     * constant so it becomes a multiply, and 1/r is computed
+                     * once and used for both axes. */
                     float inv_r = 1.0f / sqrtf(r2);
                     float r = r2 * inv_r;
                     float q = 1.0f - r * INV_HR;
@@ -293,17 +314,18 @@ static void neighbors_relax(float dt)
                         nb_uy[nb] = dy * inv_r;
                         nb++;
                     } else {
-                        /* 🚨 여기 오면 물이 한 자리에 128개 넘게 뭉친 것이다.
-                         * 380개 중 3분의 1이 반지름 22 안에 든다는 뜻이라
-                         * 실제로는 안 일어난다. 나면 알아야 한다. */
+                        /* 🚨 Reaching here means more than 128 particles in
+                         * one spot — a third of them inside a radius of 22,
+                         * which does not actually happen. If it ever does,
+                         * we want to know. */
                         static bool told;
-                        if (!told) { told = true; ESP_LOGW("water", "이웃이 %d개를 넘었다", NB_MAX); }
+                        if (!told) { told = true; ESP_LOGW("water", "more than %d neighbours", NB_MAX); }
                     }
                 }
             }
         }
 
-        /* ── 훑기 둘 — 담아둔 것으로 민다 ──────────────────── */
+        /* ── second walk: push, using what was collected ─────── */
         float P  = KSTIFF * (rho - s_rho0);
         float PN = KNEAR  * rhon;
         float dxi = 0, dyi = 0;
@@ -321,8 +343,9 @@ static void neighbors_relax(float dt)
 
 static void fluid_step(float dt, float gx, float gy)
 {
-    /* 점성 — 서로 다가가거나 멀어지는 속도를 조금 나눈다.
-     * 이게 있어야 물이 뚝뚝 끊기지 않고 한 덩어리로 흐른다. */
+    /* Viscosity — share a little of the speed at which neighbours approach or
+     * separate. This is what makes the water flow as one body instead of
+     * breaking into pieces. */
     grid_build_from_current();
     for (int i = 0; i < NP; i++) {
         int cx = (int)(s_x[i] / GS), cy = (int)(s_y[i] / GS);
@@ -333,25 +356,25 @@ static void fluid_step(float dt, float gx, float gy)
                 int xx = cx + ox;
                 if (xx < 0 || xx >= GC) continue;
                 for (uint16_t j = s_head[yy * GC + xx]; j != 0xFFFF; j = s_next[j]) {
-                    if (j <= i) continue;             /* 짝마다 한 번만 */
+                    if (j <= i) continue;             /* each pair once */
                     float dx = s_x[j] - s_x[i], dy = s_y[j] - s_y[i];
                     float r2 = dx * dx + dy * dy;
                     if (r2 >= HR2 || r2 < 1e-4f) continue;
                     float inv_r = 1.0f / sqrtf(r2);
                     float ux = dx * inv_r, uy = dy * inv_r;
                     float vr = (s_vx[i] - s_vx[j]) * ux + (s_vy[i] - s_vy[j]) * uy;
-                    if (vr <= 0) continue;            /* 다가갈 때만 */
+                    if (vr <= 0) continue;            /* only when approaching */
                     float q = 1.0f - (r2 * inv_r) * INV_HR;
-                    /* 🚨 점성 = 물의 무게감이다. 0.10 이면 입자가 서로를 거의
-                     * 안 붙잡아 모래처럼 가볍게 흩어진다(0909 제보: "물 움직임이
-                     * 물 같지 않게 너무 가볍다"). 올리면 한 덩어리로 끈적하게
-                     * 흐르고, 덤으로 빨리 가라앉아 water_is_still() 이 자주
-                     * 걸려서 그리는 값도 준다. */
-                    /* 🚨 0.10 → 0.22 → 0.32. 올릴수록 입자가 서로를 붙잡아
-                     * 한 덩어리로 끈적하게 흐른다 = 무게감이다(0910 제보:
-                     * "중력값을 너무 세게 먹는 것 같다. 무게감을 좀 주자").
-                     * 중력만 낮추면 무거운 게 아니라 물속처럼 둥둥 뜬다 —
-                     * 점성을 같이 올려야 묵직해진다. */
+                    /* 🚨 Viscosity is the sense of weight. At 0.10 the
+                     * particles barely hold onto each other and scatter like
+                     * sand ("the water moves too lightly to be water").
+                     * Higher and it flows as one sticky body — and as a
+                     * bonus it settles sooner, so water_is_still() triggers
+                     * more often and the drawing costs less. */
+                    /* 🚨 0.10 -> 0.22 -> 0.32. ("It feels like gravity is too
+                     * strong. Give it some weight.") Lowering gravity alone
+                     * does not read as heavy — it reads as floating
+                     * underwater. Viscosity has to come up with it. */
                     float imp = dt * q * (0.55f * vr) * 0.5f;
                     s_vx[i] -= ux * imp; s_vy[i] -= uy * imp;
                     s_vx[j] += ux * imp; s_vy[j] += uy * imp;
@@ -360,40 +383,42 @@ static void fluid_step(float dt, float gx, float gy)
         }
     }
 
-    /* 중력으로 옮긴다 */
+    /* Move under gravity */
     for (int i = 0; i < NP; i++) {
         s_vx[i] += gx * dt;
         s_vy[i] += gy * dt;
-        s_px[i] = s_x[i];                 /* 옮기기 전 자리를 기억 */
+        s_px[i] = s_x[i];                 /* remember where it was */
         s_py[i] = s_y[i];
         s_x[i] += s_vx[i] * dt;
         s_y[i] += s_vy[i] * dt;
     }
 
-    /* 밀도를 고르게 맞춘다 */
+    /* Even out the density */
     grid_build_from_current();
     neighbors_relax(dt);
 
-    /* 통 안으로 되돌리고, 실제로 움직인 거리에서 속도를 되뽑는다 */
+    /* Put them back in the bowl, and recover velocity from how far they moved */
     float inv = 1.0f / dt;
     for (int i = 0; i < NP; i++) {
         clamp_circle(&s_x[i], &s_y[i]);
         s_vx[i] = (s_x[i] - s_px[i]) * inv;
         s_vy[i] = (s_y[i] - s_py[i]) * inv;
         float sp2 = s_vx[i] * s_vx[i] + s_vy[i] * s_vy[i];
-        /* 🚨 1000 으로 내렸던 것은 잘못이었다. 이 상한은 **자유낙하 속도보다
-         * 높아야 한다** — 낮으면 제대로 떨어지는 물까지 잘라서 오히려 느리고
-         * 가벼워 보인다. 통 높이 400 에 중력 1900 이면 √(2·g·h) ≈ 1233 이므로
-         * 1300 이 아래 한계다. 이건 폭주를 잡는 그물이지 무게 손잡이가 아니다. */
-        if (sp2 > 1300.0f * 1300.0f) {    /* 너무 빠르면 이웃을 뛰어넘어 찢어진다 */
+        /* 🚨 Lowering this to 1000 was a mistake. The cap has to sit **above
+         * free-fall speed** — below it, water that is falling correctly gets
+         * clipped and the whole thing looks slower and lighter. The bowl is
+         * 400 tall and gravity is 1900, so sqrt(2gh) is about 1233, which
+         * makes 1300 the floor. This is a net for runaway values, not a
+         * weight control. */
+        if (sp2 > 1300.0f * 1300.0f) {    /* too fast and it jumps past its neighbours and tears */
             float k = 1300.0f / sqrtf(sp2);
             s_vx[i] *= k; s_vy[i] *= k;
         }
     }
 }
 
-/* 흔든 세기를 부드럽게 매긴다. 문턱을 조금 넘긴 것은 거의 안 먹고, 크게
- * 넘긴 것은 그대로 먹는다 — 문턱에서 값이 뚝 끊기지 않게 0 에서 이어붙인다. */
+/* Score a shake smoothly. Just over the threshold barely counts, well over
+ * counts fully — joined at zero so the value does not jump at the threshold. */
 static float shake_curve(float v)
 {
     float a = fabsf(v);
@@ -404,36 +429,38 @@ static float shake_curve(float v)
     return (v < 0.0f ? -1.0f : 1.0f) * a * t;
 }
 
-/* ── 그리기 ───────────────────────────────────────────────────
- * 입자를 그냥 동그라미로 그리면 알갱이 더미로 보인다. 대신 열마다
- * "여기 물이 어디부터 어디까지 있나"를 세어 이어진 토막으로 칠한다 —
- * 붙어 있으면 한 덩어리로, 떨어져 나간 것은 따로 그려진다. */
-#define COLW 6                          /* 세는 열의 너비 */
+/* ── drawing ──────────────────────────────────────────────────
+ * Drawing the particles as circles looks like a heap of grains. Instead each
+ * column is scanned for "where does water start and stop here?" and painted
+ * as connected runs — touching particles become one body, and anything that
+ * has come away is drawn separately. */
+#define COLW 6                          /* width of a scan column */
 #define NCOL (466 / COLW + 1)
 #define ROWH 6
 #define NROW (466 / ROWH + 1)
 static uint8_t (*s_dens)[NCOL];
-static uint8_t (*s_chur)[NCOL];   /* 그 자리 물이 얼마나 요동치나 — 거품용 */
+static uint8_t (*s_chur)[NCOL];   /* how agitated the water is there — drives the foam */
 
-/* 열마다 물이 있는 토막. 떨어져 나간 덩어리는 따로 잡히게 세 개까지 둔다. */
+/* Runs of water per column. Up to three, so a detached blob is caught separately. */
 #define SPANS 3
 static int16_t (*s_sp0)[SPANS], (*s_sp1)[SPANS];
 static uint8_t *s_spn;
-static uint8_t *s_sfrac;    /* 수면이 픽셀의 몇 할을 덮나 — 가장자리를 부드럽게 */
-static int8_t  *s_slope;    /* 수면 기울기 — 빛이 닿는 면을 밝게 */
-static uint8_t *s_foam;     /* 거품 */
-static int      *s_cur;     /* 줄을 훑을 때 열마다 지금 보는 토막 */
-static uint16_t *s_scol;    /* 열마다 미리 구해 둔 수면 세 줄 색 */
+static uint8_t *s_sfrac;    /* what fraction of the pixel the surface covers — softens the edge */
+static int8_t  *s_slope;    /* surface slope — lights the faces the light reaches */
+static uint8_t *s_foam;     /* foam */
+static int      *s_cur;     /* which run each column is on, while scanning a row */
+static uint16_t *s_scol;    /* three precomputed surface colours per column */
 
-/* 🚨 물 그림은 우리가 직접 채워 이미지 한 장으로 넘긴다. 왜인지는 draw_cb 위
- * 주석에 있다. 466x466 RGB565 = 434KB — PSRAM 에 3.3MB 가 논다(0909 실측). */
+/* 🚨 We fill the water image ourselves and hand it over as one picture; why
+ * is in the comment above draw_cb. 466x466 RGB565 = 434 KB, and there are
+ * 3.3 MB of PSRAM sitting idle. */
 static uint16_t *s_img;
 static lv_image_dsc_t s_img_dsc;
-/* 지난 프레임에 물이 있던 자리. 거기만 지우면 434KB 를 통째로 안 만진다.
- * 🚨 draw_cb 가 paint_img 보다 앞에 있으므로 선언은 여기 둔다. */
+/* Where the water was last frame. Clearing only that avoids touching all
+ * 434 KB. 🚨 draw_cb comes before paint_img, so the declaration lives here. */
 static int s_img_y0 = 0, s_img_y1 = 465;
 static lv_image_dsc_t s_img_strip;
-static uint16_t s_depth_lut[201];   /* 수면에서 몇 픽셀 깊은가 → 색 */
+static uint16_t s_depth_lut[201];   /* depth below the surface, in pixels -> colour */
 
 #define RGB565(r, g, b) ((uint16_t)((((r) & 0xF8) << 8) | (((g) & 0xFC) << 3) | ((b) >> 3)))
 
@@ -447,7 +474,7 @@ static void depth_lut_build(void)
     }
 }
 
-/* 그 자리의 물 진하기 — 칸 사이는 이어서 읽는다(그래야 안 각진다) */
+/* How thick the water is there — read with interpolation between cells, or it looks faceted */
 static float dens_at(float fx, int r)
 {
     if (r < 0 || r >= NROW) return 0;
@@ -459,9 +486,9 @@ static float dens_at(float fx, int r)
     return s_dens[r][ci] * (1 - t) + s_dens[r][ci + 1] * t;
 }
 
-/* 🚨 6px 칸을 그대로 칠하면 계단처럼 각진다(0909 실측). 진하기가 문턱을
- * 넘는 자리를 칸 사이에서 이어서 찾으면 매끈해진다. 한 프레임에 한 번만
- * 구해두고 밴드마다는 읽기만 한다. */
+/* 🚨 Painting the 6 px cells as they are gives visible stair steps. Finding
+ * where the thickness crosses the threshold, interpolated between cells,
+ * makes it smooth. Computed once a frame and only read per band. */
 #define THRESH 3.0f
 static void build_spans(void)
 {
@@ -469,7 +496,7 @@ static void build_spans(void)
     memset(s_chur, 0, (size_t)NROW * NCOL);
     for (int i = 0; i < NP; i++) {
         int c = (int)(s_rx[i] / COLW), r = (int)(s_ry[i] / ROWH);
-        /* 빠른 입자가 모인 곳이 부서지는 자리다 — 거기에 거품이 인다 */
+        /* Where the fast particles gather is where it breaks — that is where foam appears */
         float sp = fabsf(s_rvx[i]) + fabsf(s_rvy[i]);
         int ch = (int)(sp * 0.35f);
         if (ch > 60) ch = 60;
@@ -495,16 +522,16 @@ static void build_spans(void)
         for (int r = 1; r < NROW && n < SPANS; r++) {
             float d = dens_at(x, r);
             bool was = prev >= THRESH, now = d >= THRESH;
-            if (!was && now) {                      /* 물이 시작되는 자리 */
+            if (!was && now) {                      /* water starts here */
                 float f = (THRESH - prev) / (d - prev + 1e-6f);
                 topr = r - 1; topf = f;
                 if (n == 0) {
-                    /* 수면이 그 픽셀을 몇 할이나 덮나. 이걸로 맨 윗줄 색을
-                     * 섞으면 톱니가 안 보인다(부분 화소). */
+                    /* What fraction of that pixel the surface covers. Blending
+                     * the top row with it hides the jaggedness (sub-pixel). */
                     float yf = (topr + topf) * ROWH;
                     s_sfrac[x] = (uint8_t)((1.0f - (yf - floorf(yf))) * 255.0f);
                 }
-            } else if (was && !now && topr >= 0) {   /* 끝나는 자리 */
+            } else if (was && !now && topr >= 0) {   /* and ends here */
                 float f = (prev - THRESH) / (prev - d + 1e-6f);
                 s_sp0[x][n] = (int16_t)((topr + topf) * ROWH);
                 s_sp1[x][n] = (int16_t)((r - 1 + f) * ROWH);
@@ -520,7 +547,7 @@ static void build_spans(void)
         }
         s_spn[x] = (uint8_t)n;
 
-        /* 그 자리 물의 요동 — 수면 바로 아래를 본다 */
+        /* How agitated the water is there — measured just under the surface */
         int fr = 0;
         if (n) {
             int rr = s_sp0[x][0] / ROWH;
@@ -533,8 +560,8 @@ static void build_spans(void)
         s_foam[x] = (uint8_t)fr;
     }
 
-    /* 수면 기울기 — 빛을 받는 면을 밝게 하려면 이게 있어야 한다.
-     * 평평한 색면만 칠하면 아무리 잘 흘러도 그림이 납작해 보인다. */
+    /* Surface slope. Without it, lighting the faces is impossible and the
+     * picture looks flat however well the water moves. */
     for (int x = 0; x < 466; x++) {
         int a = x > 3 ? x - 4 : 0, b = x < 462 ? x + 4 : 465;
         if (!s_spn[a] || !s_spn[b]) { s_slope[x] = 0; continue; }
@@ -545,36 +572,40 @@ static void build_spans(void)
     }
 }
 
-/* 🚨 왜 물을 우리가 직접 칠하나 — 0909 실기에서 잰 값이 답이다.
+/* 🚨 Why we paint the water ourselves — the measurements answer it.
  *
- * 예전엔 여기서 열마다 lv_draw_rect 를 불렀다. 깊이 색 10칸 + 수면 3줄이니
- * 열당 13번, 466열이면 6,000번이다. 그런데 실제로는 그보다 훨씬 많았다 —
- * display.c 의 화면 버퍼가 16줄뿐이라(SPI DMA 가 그만큼의 내부 RAM 을
- * 요구하는데 물 앱 돌 때 내부 힙 최저가 23KB 다) LVGL 이 한 프레임을
- * 466/16 = 30조각으로 나눠 그리고, 이 콜백이 조각마다 다시 불려 466열을
- * 처음부터 훑는다. 그래서 한 프레임에 draw_rect 가 2만 번 넘게 불렸다.
+ * This callback used to call lv_draw_rect per column: ten depth bands plus
+ * three surface rows is thirteen per column, so 6,000 for 466 columns. In
+ * practice it was far more than that. display.c's draw buffer is sixteen
+ * lines (SPI DMA wants that much internal RAM, and the internal heap bottoms
+ * out at 23 KB while this app runs), so LVGL splits a frame into 466/16 = 30
+ * pieces and calls this back for each one, walking all 466 columns every
+ * time. That is more than twenty thousand draw_rect calls a frame.
  *
- * 잰 값: 계산 39ms · 진짜 프레임 간격 311ms → 초당 3장.
- * 사라진 272ms 가 전부 여기였다. 그리고 그 느린 프레임이 물리의 한 걸음을
- * 33ms 로 키워(8ms 여야 한다) 물을 통째로 위로 날려버렸다.
+ * Measured: 39 ms of computation, a 311 ms real frame interval — 3 fps. The
+ * missing 272 ms was all here. And those slow frames stretched a physics step
+ * to 33 ms (it should be 8), which threw the water out of the bowl.
  *
- * 먼저 세로 그라디언트로 열당 1번으로 줄여봤는데 오히려 느려졌다
- * (311 → 450ms). 열마다 색이 달라 466개의 서로 다른 그라디언트가 생기고,
- * LVGL 은 그라디언트마다 맵을 새로 만들기 때문이다.
+ * Reducing it to one vertical gradient per column was tried first and came
+ * out *slower* (311 -> 450 ms): every column has different colours, so that
+ * is 466 distinct gradients, and LVGL builds a fresh map for each one.
  *
- * 그래서 부르는 횟수를 줄이는 대신 아예 안 부르기로 했다. 픽셀은 paint_img()
- * 가 우리 버퍼에 한 번만 찍고(조각 나누기와 무관하다), 여기선 그림 한 장을
- * 넘긴다 — 조각당 1번, 프레임당 30번이다. 2만 번이 30번이 됐다.
+ * So instead of calling less, it does not call at all. paint_img() writes the
+ * pixels into our own buffer once (independently of how LVGL splits the
+ * frame) and this hands over a single image — one call per piece, thirty per
+ * frame. Twenty thousand became thirty.
  *
- * 🚨 배를 물보다 나중에 그린다. 예전엔 배를 먼저 그리고 물을 덮어 잠긴
- * 부분이 가려졌는데, 그림이 불투명이라 그 순서로는 배가 지워진다. 배가
- * 물에 잠기는 모습이 필요해지면 배도 paint_img() 안에서 찍어야 한다. */
-/* 🚨 LVGL 은 무효 영역을 화면 배경(검정)으로 한 벌 칠한 뒤 그 위에 우리
- * 그림을 덮는다. 우리 그림이 그 자리를 불투명하게 다 덮는데도 그렇다 —
- * 같은 픽셀을 두 번 만지는 셈이다. 덮는다고 알려주면 배경칠이 통째로 빠진다
- * (0909: 그리기 75ms 중 한 벌이 여기였다).
- * 🚨 우리가 실제로 칠한 띠(s_img_y0~y1) 안일 때만 '덮는다' 고 해야 한다.
- * 그 밖까지 덮는다고 하면 지워져야 할 자리가 안 지워진다. */
+ * 🚨 The boat is drawn after the water here. It used to be drawn first and
+ * covered by the water so the submerged part was hidden, but the image is
+ * opaque and in that order the boat is simply erased. If the boat needs to
+ * sit in the water again, it has to be painted inside paint_img(). */
+/* 🚨 LVGL paints the invalidated area with the screen background (black) and
+ * then draws our image over it — even though our image covers that area
+ * opaquely. That is every pixel touched twice. Telling it we cover the area
+ * removes the background pass entirely (it was one of two passes in 75 ms of
+ * drawing).
+ * 🚨 Only claim to cover inside the band we actually painted (s_img_y0..y1).
+ * Claiming more than that leaves things that should have been erased. */
 static void cover_cb(lv_event_t *e)
 {
     if (!s_img) { lv_event_set_cover_res(e, LV_COVER_RES_NOT_COVER); return; }
@@ -587,16 +618,17 @@ static void cover_cb(lv_event_t *e)
 
 static void draw_cb(lv_event_t *e)
 {
-    if (!s_x || !s_spn) return;      /* 이미 놓았으면 그리지 않는다 */
+    if (!s_x || !s_spn) return;      /* already freed — do not draw */
     lv_layer_t *layer = lv_event_get_layer(e);
 
     if (s_img) {
-        /* 🚨 물이 있는 띠만 넘긴다. 나머지는 LVGL 이 어차피 배경을 새로
-         * 칠하므로 검정으로 남는다 — 넘길 이유가 없다. */
+        /* 🚨 Hand over only the band that has water in it. LVGL repaints the
+         * background elsewhere anyway, so the rest stays black — there is
+         * nothing to send. */
         lv_draw_image_dsc_t idsc;
         lv_draw_image_dsc_init(&idsc);
-        /* 띠의 첫 줄을 가리키는 표를 따로 둔다. 그림을 잘라 쓰는 것보다
-         * 시작 주소와 높이만 바꿔 주는 쪽이 헷갈릴 여지가 없다. */
+        /* A separate descriptor points at the band's first row. Changing the
+         * start address and the height is less error-prone than cropping. */
         idsc.src = &s_img_strip;
         lv_area_t coords = { 0, s_img_y0, 465, s_img_y1 };
         lv_draw_image(layer, &idsc, &coords);
@@ -609,12 +641,13 @@ static void draw_cb(lv_event_t *e)
 
 }
 
-/* ── 배를 그림에 찍기 ─────────────────────────────────────────
- * 🚨 예전엔 LVGL 삼각형으로 물보다 **먼저** 그려서, 잠긴 부분이 물에 가려졌다.
- * 그림 한 장으로 넘기게 바꾸면서 배가 물보다 뒤로 밀렸고 — 그림이 불투명이라
- * 배가 늘 맨 위에 뜨게 됐다. "물에 절대 안 잠긴다"(0909 제보)가 그것이다.
- * 배도 같은 그림 안에 찍으면 순서가 되살아난다. 덤으로 삼각형 12개 x 조각
- * 20개 = 240번이던 그리기 호출이 사라진다. */
+/* ── painting the boat into the image ─────────────────────────
+ * 🚨 The boat used to be an LVGL triangle drawn **before** the water, so the
+ * submerged part was covered. Switching to handing over one image pushed the
+ * boat behind the water — and since the image is opaque, the boat ended up
+ * always on top instead ("it never goes under the water"). Painting the boat
+ * into the same image restores the ordering. As a bonus, twelve triangles
+ * times twenty pieces — 240 draw calls — disappear. */
 static void fill_tri(float x0, float y0, float x1, float y1,
                      float x2, float y2, uint16_t c)
 {
@@ -624,7 +657,7 @@ static void fill_tri(float x0, float y0, float x1, float y1,
     if (ymax > 465) ymax = 465;
     for (int y = ymin; y <= ymax; y++) {
         float yc = y + 0.5f;
-        /* 세 변과 이 가로줄이 만나는 x 를 모은다 */
+        /* Collect the x values where the three edges cross this row */
         float xs[3]; int nx = 0;
         float px[3] = { x0, x1, x2 }, py[3] = { y0, y1, y2 };
         for (int e = 0; e < 3; e++) {
@@ -646,12 +679,12 @@ static void fill_tri(float x0, float y0, float x1, float y1,
     }
 }
 
-/* 지금 자세의 배를 그림에 찍고, 차지한 세로 범위를 돌려준다. */
+/* Paint the boat at its current attitude and return the rows it occupied. */
 static void paint_boat(int *out_y0, int *out_y1)
 {
     float bx = s_boat_x, by = s_boat_y;
     float bdeg = 0;
-    {   /* 배 밑 물살의 기울기로 눕힌다 */
+    {   /* Lean it with the slope of the water beneath it */
         float lft = 0, rgt = 0; int nl = 0, nr = 0;
         for (int i = 0; i < NP; i++) {
             float d = s_rx[i] - bx;
@@ -660,15 +693,17 @@ static void paint_boat(int *out_y0, int *out_y1)
         }
         if (nl && nr) bdeg = atanf(((rgt / nr) - (lft / nl)) / 40.0f) / DEG2RAD * 0.6f;
     }
-    /* 🚨 중력 쪽으로 세운다. 부호를 뒤집어 넣었다가 90도·270도 에서만 배가
-     * 거꾸로 서서 돛이 물에 닿았다(0909 제보) — 0도·180도 는 부호를 뒤집어도
-     * 같은 각이라 절반만 틀린 꼴로 보인다. */
+    /* 🚨 Stand it up along gravity. With the sign inverted, the boat was
+     * upside down at 90 and 270 degrees only and its mast went into the water
+     * — at 0 and 180 an inverted sign gives the same angle, so it looked half
+     * correct. */
     bdeg -= atan2f(s_gux, s_guy) / DEG2RAD;
 
-    /* 🚨 여태 이 각을 그대로 썼다 — 기울이는 즉시 배가 홱 돌아섰다. 무거운
-     * 배는 그렇게 못 돈다. 늦게 따라가게 한다.
-     * 🚨 각은 ±180 에서 넘어가므로 차이를 먼저 그 안으로 접어야 한다.
-     * 안 접으면 한 바퀴를 거꾸로 도는 꼴이 난다. */
+    /* 🚨 This angle used to be used directly, and the boat snapped round the
+     * instant you tilted. A heavy boat cannot turn like that, so it follows
+     * behind.
+     * 🚨 Angles wrap at ±180, so the difference has to be folded into that
+     * range first. Without folding it takes the long way round. */
     {
         static float sm;
         static bool  first = true;
@@ -685,8 +720,8 @@ static void paint_boat(int *out_y0, int *out_y1)
     #define BX(px, py) (bx + (px) * bc - (py) * bs)
     #define BY(px, py) (by + (px) * bs + (py) * bc)
     #define TRI(c, ax, ay, bx_, by_, cx, cy) do {         float _y0 = BY(ax, ay), _y1 = BY(bx_, by_), _y2 = BY(cx, cy);         fill_tri(BX(ax, ay), _y0, BX(bx_, by_), _y1, BX(cx, cy), _y2, (c));         float _lo = fminf(_y0, fminf(_y1, _y2)), _hi = fmaxf(_y0, fmaxf(_y1, _y2));         if ((int)_lo < lo) lo = (int)_lo;         if ((int)_hi + 1 > hi) hi = (int)_hi + 1;     } while (0)
-    /* 🚨 어두운 실루엣으로 갔더니 짙은 물에 묻혀 안 보였다(0909).
-     * 선체를 나무빛으로 밝히고 테두리를 한 톤 더 올린다. */
+    /* 🚨 A dark silhouette disappeared against deep water. The hull is lifted
+     * to a wood tone and the outline is a shade brighter still. */
     const uint16_t HULL  = RGB565(0xB0, 0x70, 0x3C), HULL2 = RGB565(0xE0, 0xA4, 0x68);
     const uint16_t SAIL  = RGB565(0xFF, 0xFD, 0xF6), SAIL2 = RGB565(0xE8, 0xDC, 0xC4);
     const uint16_t FLAG  = RGB565(0xFF, 0xE0, 0x8A);
@@ -711,35 +746,39 @@ static void paint_boat(int *out_y0, int *out_y1)
     *out_y1 = hi;
 }
 
-/* ── 물 그림 채우기 ───────────────────────────────────────────
- * 토막(s_sp0/s_sp1)은 step() 이 이미 구해뒀다. 여기선 픽셀만 찍는다.
- * 조각 나누기와 무관하게 한 번만 돈다 — 그게 이 방식의 요점이다. */
+/* ── filling in the water image ───────────────────────────────
+ * The runs (s_sp0/s_sp1) were already worked out by step(). This only writes
+ * pixels. It runs once regardless of how LVGL splits the frame — which is the
+ * entire point of doing it this way. */
 static void paint_img(void)
 {
     if (!s_img) return;
-    /* 🚨 매 프레임 434KB 를 memset 하고 466x466 을 통째로 넘기는 건 낭비다.
-     * 물은 대개 아래쪽 절반에만 있다. 지난번에 그린 만큼만 지우고, 이번에
-     * 그린 만큼만 넘긴다(0909: 그리기 78ms 중 상당수가 안 쓰는 자리였다). */
+    /* 🚨 memset-ing 434 KB and handing over the full 466x466 every frame is
+     * waste. The water is usually in the lower half. Clear only what was drawn
+     * last time and hand over only what was drawn this time (much of 78 ms of
+     * drawing was spent on area that was never used). */
     memset(s_img + (size_t)s_img_y0 * 466, 0,
            (size_t)(s_img_y1 - s_img_y0 + 1) * 466 * 2);
     int ny0 = 465, ny1 = 0;
 
-    /* 🚨 배를 물보다 **먼저** 찍는다. 그래야 잠긴 부분을 물이 덮는다.
-     * 순서가 뒤집혔던 탓에 배가 늘 맨 위에 떠 있었다(0909 제보). */
+    /* 🚨 Paint the boat **before** the water, so the water covers the
+     * submerged part. With that order reversed the boat always floated on top. */
     {
         int b0, b1;
         paint_boat(&b0, &b1);
         if (b0 < ny0) ny0 = b0;
         if (b1 > ny1) ny1 = b1;
     }
-    /* 🚨 예전엔 열을 먼저 돌고 그 안에서 세로로 내려갔다. 그림 버퍼는 가로로
-     * 누워 있는데(한 줄이 932바이트) 세로로 훑으면 픽셀 하나 쓸 때마다 주소가
-     * 932바이트씩 점프한다 — 21만 번이 전부 캐시 라인이 다르다. PSRAM 에
-     * 그러니 그림 채우기에만 35ms 가 들었다(0909 실측).
-     * 가로로 뒤집어 한 줄을 이어서 쓴다. 쓰기가 버스트로 나간다.
+    /* 🚨 This used to loop columns first and walk down inside each one. The
+     * image buffer is laid out in rows (932 bytes each), so walking down
+     * jumps the address by 932 bytes per pixel — two hundred thousand writes,
+     * every one on a different cache line, into PSRAM. Filling the image
+     * alone cost 35 ms.
+     * Flipped to rows, writing a row contiguously, so the writes burst.
      *
-     * 열마다 필요한 것(수면 세 줄 색, 깊이 기준)은 미리 구해 둔다 — 줄을 도는
-     * 안쪽 고리는 되도록 가볍게. */
+     * Everything a column needs (three surface colours, the depth reference)
+     * is computed up front — the inner loop over the row stays as light as
+     * possible. */
     int wy0 = 465, wy1 = 0;
     for (int x = 0; x < 466; x++) {
         s_cur[x] = 0;
@@ -750,14 +789,15 @@ static void paint_img(void)
         int last = s_sp1[x][nsp - 1];
         if (last > wy1) wy1 = last;
 
-        /* ── 수면 세 줄 ─────────────────────────────────────
-         * 🚨 평평한 색면만 칠하면 아무리 잘 흘러도 납작해 보인다.
-         * 물처럼 보이게 하는 건 세 가지다:
-         *   기울기  빛을 향한 면은 밝고 등진 면은 어둡다
-         *   거품    부서지는 자리는 하얗다
-         *   덮임    맨 윗줄을 덮인 만큼만 칠해 톱니를 없앤다 */
-        int sl = s_slope[x];                 /* 오른쪽으로 내려가면 +  */
-        int lit = 128 - sl * 2;              /* 빛은 왼쪽 위에서 */
+        /* ── the three surface rows ─────────────────────────
+         * 🚨 Flat colour fields look flat however well the water moves.
+         * Three things make it read as water:
+         *   slope     faces toward the light are bright, away are dark
+         *   foam      where it breaks, it goes white
+         *   coverage  the top row is painted by how much it covers, which
+         *             removes the jaggedness */
+        int sl = s_slope[x];                 /* + means falling to the right */
+        int lit = 128 - sl * 2;              /* light comes from the upper left */
         if (lit < 40) lit = 40;
         if (lit > 255) lit = 255;
         int fo = s_foam[x];
@@ -783,16 +823,17 @@ static void paint_img(void)
     if (wy0 < 0) wy0 = 0;
     if (wy1 > 465) wy1 = 465;
 
-    /* 🚨 어떻게 훑느냐가 값을 정한다. 두 번 틀리고 세 번째에 맞췄다(0909).
-     *
-     *   1) 열을 먼저 돌고 세로로 내려가기 — 픽셀마다 932바이트씩 점프한다.
-     *      한 열을 내려가며 200줄을 만지면 200개의 캐시 라인을 건드리는데,
-     *      그 작업 크기가 186KB 라 64KB 캐시에 안 들어간다. 35ms.
-     *   2) 줄을 먼저 돌고 가로로 훑기 — 쓰기는 이어지지만 물 없는 열까지
-     *      전부 봐야 해서 훑는 횟수가 8만 7천 → 21만 번이 됐다. 65ms. 더 나빴다.
-     *   3) **세로로 훑되 64줄씩 끊기** — 띠 하나의 작업 크기가
-     *      64 x 932 = 59KB 라 캐시 안에 들어간다. 물 있는 픽셀만 만지면서
-     *      캐시도 안 어긋난다. 둘의 좋은 쪽만 남는다. */
+    /* 🚨 How this is walked decides what it costs. Two wrong answers before
+     * the third.
+     *   1) columns outer, walking down — 932 bytes per pixel of jump. Going
+     *      down one column touching 200 rows touches 200 cache lines, and the
+     *      working set is 186 KB against a 64 KB cache. 35 ms.
+     *   2) rows outer, walking across — the writes are contiguous, but every
+     *      column has to be visited whether it has water or not, so the
+     *      number of iterations went from 87,000 to 210,000. 65 ms. Worse.
+     *   3) **walk down, but in bands of 64 rows** — one band's working set is
+     *      64 x 932 = 59 KB, which fits in cache. It touches only pixels with
+     *      water in them and stays cache-resident. The good half of both. */
     #define BANDH 64
     for (int b0 = wy0; b0 <= wy1; b0 += BANDH) {
         int b1 = b0 + BANDH - 1;
@@ -800,14 +841,16 @@ static void paint_img(void)
         for (int x = 0; x < 466; x++) {
             int nsp = s_spn[x];
             if (!nsp) continue;
-            /* 🚨 깊이는 "이 픽셀 위에 물이 얼마나 있나" 로 잰다.
-             * 처음엔 그 토막의 머리에서 쟀더니 토막마다 0부터 다시 세어
-             * 토막 머리마다 밝은 줄이 생겼다. 그래서 '이 열의 첫 토막 머리'
-             * 로 바꿨더니 이번엔 세로줄이 생겼다(0909 제보) — 물방울 하나가
-             * 위로 튀어 있으면 그 아래 전체가 '아주 깊은 물' 이 되는데 옆
-             * 열은 안 그러니 경계가 선다.
-             * 위에 실제로 쌓인 두께를 세면 둘 다 없어진다. 떠 있는 물방울은
-             * 제 두께만큼만 보태므로 아래 물빛을 안 흔든다. */
+            /* 🚨 Depth is measured as "how much water is above this pixel".
+             * Measuring from the head of the run made every run restart at
+             * zero, so a bright line appeared at the top of each one.
+             * Measuring from the head of the column's first run instead gave
+             * vertical seams: one droplet thrown up above a column makes
+             * everything under it read as very deep water while the next
+             * column does not.
+             * Counting the thickness actually stacked above fixes both. A
+             * floating droplet only contributes its own thickness and does
+             * not disturb the colour below it. */
             int above = 0;
             for (int k = 0; k < nsp; k++) {
                 int t0 = s_sp0[x][k], t1 = s_sp1[x][k];
@@ -830,7 +873,7 @@ static void paint_img(void)
         if (wy0 < ny0) ny0 = wy0;
         if (wy1 > ny1) ny1 = wy1;
     }
-    if (ny1 < ny0) { ny0 = 0; ny1 = 0; }      /* 물이 하나도 없었다 */
+    if (ny1 < ny0) { ny0 = 0; ny1 = 0; }      /* there was no water at all */
     s_img_y0 = ny0;
     s_img_y1 = ny1;
     s_img_strip = s_img_dsc;
@@ -839,47 +882,48 @@ static void paint_img(void)
     s_img_strip.data_size = (size_t)(ny1 - ny0 + 1) * 466 * 2;
 }
 
-/* ── 한 프레임 ─────────────────────────────────────────────── */
-/* 🔋 물이 잔잔하고 손도 안 대면 계산할 이유가 없다.
- * 입자 620개를 굴리는 건 이 기기에서 제일 비싼 축이라, 멈춘 물을 계속
- * 푸는 건 그냥 배터리를 태우는 짓이다. 다 가라앉으면 쉬고, 조금이라도
- * 움직이거나 손이 닿으면 곧바로 깨어난다. */
+/* ── one frame ─────────────────────────────────────────────── */
+/* 🔋 Still water that nobody is touching has nothing to compute.
+ * Stepping the particles is among the most expensive things this device does,
+ * and solving motionless water is simply burning battery. Once it settles it
+ * rests, and any movement or any touch wakes it immediately. */
 static bool water_is_still(void)
 {
     float e = 0;
-    for (int i = 0; i < NP; i += 4)          /* 넷에 하나만 봐도 충분하다 */
+    for (int i = 0; i < NP; i += 4)          /* every fourth one is enough to tell */
         e += fabsf(s_vx[i]) + fabsf(s_vy[i]);
     return e < (NP / 4) * 1.2f;
 }
 
 
-/* ── 프레임 시간 눈금 ─────────────────────────────────────────
- * 🔋 전력을 재려면 한 프레임에 CPU 를 얼마나 쓰는지부터 알아야 한다.
- * 128번 모아 한 줄만 찍는다 — 로그 자체가 부담이 되면 안 되니까. */
+/* ── frame-time meter ─────────────────────────────────────────
+ * 🔋 Measuring power starts with knowing how much CPU a frame costs.
+ * Averaged and logged as one line — the logging must not become the cost. */
 static void frame_tick(const char *who, int64_t t0)
 {
     static uint32_t n; static uint64_t sum; static uint32_t hi; static int64_t since;
-    /* 🚨 계산하는 시간만 재면 반쪽이다. 그 뒤에 LVGL 이 실제로 칠하는 일과
-     * 화면으로 밀어 보내는 일이 빠진다 — 물은 build_spans() 가 데이터만
-     * 준비하고 진짜 칠하기는 나중에 일어나서, "초당 25장" 이라 해놓고 눈에는
-     * 그대로였다(0909 지적). 이 함수가 다시 불릴 때까지의 **진짜 간격**을
-     * 같이 잰다. 그게 사람이 보는 속도다. */
+    /* 🚨 Timing only the computation is half the story: it leaves out what
+     * LVGL then paints and what is pushed to the panel. This app was the
+     * clearest case — build_spans() only prepares data and the painting
+     * happens later, so it reported "25 fps" while the screen plainly was
+     * not. Measure the **real interval** until this is called again. That is
+     * the speed a person sees. */
     static int64_t prev; static uint64_t gap; static uint32_t gapn; static uint32_t gaphi;
     int64_t now = esp_timer_get_time();
     uint32_t us = (uint32_t)(now - t0);
     sum += us; if (us > hi) hi = us;
-    if (prev && now - prev < 2000000) {          /* 앱을 새로 연 참이면 건너뛴다 */
+    if (prev && now - prev < 2000000) {          /* skip it if the app was just opened */
         uint32_t g = (uint32_t)(now - prev);
         gap += g; gapn++; if (g > gaphi) gaphi = g;
     }
     prev = now;
     if (!since) since = now;
-    /* 🚨 예전엔 128프레임마다 찍었는데, 물처럼 한 프레임이 오래 걸리는 쪽은
-     * 그 수를 못 채워 아무것도 안 나왔다. 느릴수록 알아야 하는데 느릴수록
-     * 입을 다무는 눈금이었다. 이제 3초마다 찍는다. */
+    /* 🚨 This used to log every 128 frames, which meant something as slow as
+     * the water never reached the count and never printed. The slower it got,
+     * the more silent it became. Every three seconds now. */
     if (++n && now - since >= 3000000) {
         since = now;
-        ESP_LOGI(who, "계산 %u us(최대 %u) · 진짜 간격 %u us → 실제 초당 %u장  [%u번]",
+        ESP_LOGI(who, "compute %u us (max %u) - real interval %u us -> %u fps  [%u frames]",
                  (unsigned)(sum / n), (unsigned)hi,
                  (unsigned)(gapn ? gap / gapn : 0),
                  (unsigned)(gap && gapn ? 1000000ULL * gapn / gap : 0),
@@ -890,10 +934,10 @@ static void frame_tick(const char *who, int64_t t0)
 
 static void step(lv_timer_t *t)
 {
-    /* 🔋 화면이 꺼지면 그릴 이유가 없다. 🚨 여기서 주기를 바꾸면 안 된다 —
-     * lv_timer_set_period() 가 안쪽에서 lv_timer_handler_resume() 을 불러서
-     * 타이머 콜백에서 부르면 처리기가 그 자리에서 무한히 다시 돈다.
-     * 주기는 그대로 두고 60번에 한 번만 일한다. */
+    /* 🔋 Nothing to draw with the display off. 🚨 Do not change the period
+     * here — lv_timer_set_period() calls lv_timer_handler_resume() internally,
+     * so from a timer callback the handler restarts and never returns.
+     * Leave the period and act on every 60th call. */
     if (launcher_screen_is_off()) {
         static uint8_t skip;
         if (++skip % 60) return;
@@ -905,60 +949,67 @@ static void step(lv_timer_t *t)
     s_last_ms = now;
     if (dt > 0.10f) dt = 0.10f;
 
-    /* ── 중력 ───────────────────────────────────────────────
-     * 🚨 IMU 축은 화면 축과 90도 돌아가 있다 — gx 가 세로(앞뒤),
-     * gy 가 가로(좌우)를 맡는다. 구슬에서 확인한 그대로다.
+    /* ── gravity ────────────────────────────────────────────
+     * 🚨 The IMU axes are rotated 90 degrees from the screen's: gx drives the
+     * vertical (forward and back), gy the horizontal. Same as the marble.
      *
-     * 🚨 예전엔 '어느 쪽으로 기울었나' 만 보고 세기는 1400 으로 박아뒀다.
-     * 그러면 위아래로 흔들어도 물이 아무 반응을 안 한다 — 흔들기는 방향이
-     * 아니라 '세기' 가 변하는 일이라서다(0909 지적).
-     * 이제 세 축을 그대로 받아 실제 세기를 쓴다. 아래로 흔들면 물이
-     * 무거워져 눌리고, 위로 채면 가벼워져 떠오른다. 화면 정면(Z) 으로
-     * 흔들어도 크기가 변하니 그것까지 잡힌다. */
+     * 🚨 This used to look only at *which way* it was tilted and hard-code
+     * the magnitude at 1400. Shaking it up and down then did nothing at all,
+     * because a shake changes the magnitude, not the direction.
+     * Now all three axes are taken as they are. Shake downward and the water
+     * gets heavy and presses down; flick it up and it lightens and rises.
+     * Shaking straight at the screen (Z) also changes the magnitude, so that
+     * is caught too. */
     float ax, ay, az = 1000.0f;
     bool have = port_imu_accel3(&ax, &ay, &az);
     if (!have) { ax = s_fake_gx; ay = s_fake_gy; az = 1000.0f; }
 
-    /* ── 기울이는 것도 조작이다 ─────────────────────────────
-     * 🚨 런처는 `lv_display_get_inactive_time()` 으로 무동작을 재는데 그건
-     * **터치만** 조작으로 친다. 물은 배를 기울여 몰기 때문에 화면을 안
-     * 만지고, 그러면 한창 갖고 노는 중에 30초 만에 꺼진다(0909 제보).
-     * 기울기 게임에서 겪은 것과 같은 문제이고 같은 방식으로 푼다.
+    /* ── tilting counts as input ────────────────────────────
+     * 🚨 The launcher measures idleness with lv_display_get_inactive_time(),
+     * which counts touches only. The water is steered by tilting, so the
+     * screen is never touched and it went dark after thirty seconds in the
+     * middle of playing with it. Same problem as the tilt games, solved the
+     * same way.
      *
-     * 자세가 실제로 바뀌거나 흔들 때만 깨워둔다 — 책상에 내려놓으면
-     * 안 움직이니 평소처럼 꺼진다. 🚨 물이 제 힘으로 출렁이는 것은
-     * 조작이 아니다. 그래서 물결이 아니라 **IMU 값**을 본다. */
+     * Stay awake only while the attitude is actually changing or it is being
+     * shaken — put it down and it sleeps as usual. 🚨 Water sloshing under
+     * its own momentum is not input, which is why this watches **the IMU**
+     * and not the waves. */
     if (have) {
         static float wx, wy, wz; static bool wset;
         if (!wset) { wx = ax; wy = ay; wz = az; wset = true; }
         float d = fabsf(ax - wx) + fabsf(ay - wy) + fabsf(az - wz);
-        if (d > 45.0f) {              /* 손떨림은 조작이 아니다 */
+        if (d > 45.0f) {              /* a shaky hand is not input */
             wx = ax; wy = ay; wz = az;
             lv_display_trigger_activity(NULL);
         }
     }
 
-    /* 🚨 예전엔 앱을 열 때의 자세를 '수평' 으로 박아두고(s_g0x/s_g0y) 거기서의
-     * 기울기만 봤다. 게다가 각도를 ±60도로 잘랐다. 그래서 어떻게 돌리든 물이
-     * '들고 있던 자세 기준의 아래' 로만 갔고, 360도 회전은 표현할 방법 자체가
-     * 없었다(0909 제보: "어느 방향으로 돌리든 그 방향 아래로 물이 가야 한다").
+    /* 🚨 This used to pin the attitude at app-open as "level" (s_g0x/s_g0y)
+     * and only look at tilt away from that, and it clamped the angle to ±60
+     * degrees. So however you turned it, the water only went "down relative
+     * to how you were holding it", and a full rotation was not expressible at
+     * all ("whichever way I turn it, the water should go down that way").
      *
-     * 이제 진짜 중력을 그대로 쓴다. 축은 실기에서 재서 정했다 — 배지를 세워
-     * 들었을 때 ax=-960 ay=-50 az=+120 이었다. 가속도계는 하늘을 향한 축이
-     * 양수이므로(눕히면 az=+1000) -x 가 화면 위, 곧 +x 가 화면 아래다.
-     * 중력은 읽은 값의 반대이니:
-     *     화면 오른쪽 = -ay      화면 아래 = -ax
-     * 🚨 이 매핑은 흔들기 코드(kick_x=-jy, kick_y=-jx)와도 맞아떨어진다.
-     * 서로 독립적인 두 근거가 같은 답을 가리켰다. */
+     * Now real gravity is used as it comes. The axes were measured on the
+     * board: held upright it read ax=-960 ay=-50 az=+120. The accelerometer
+     * is positive on the axis pointing at the sky (flat gives az=+1000), so
+     * -x is up the screen, which makes +x down. Gravity is the negation of
+     * what is read:
+     *     screen right = -ay      screen down = -ax
+     * 🚨 This agrees with the shake code (kick_x=-jy, kick_y=-jx). Two
+     * independent derivations landing on the same answer. */
     float dirx = -ay, diry = -ax;
     float dlen = sqrtf(dirx * dirx + diry * diry);
-    /* 🚨 눕혀 두면(화면이 하늘을 봄) 화면 평면에 중력이 거의 안 비친다.
-     * 그때 방향을 억지로 뽑으면 잡음으로 빙빙 돈다 — 그냥 아래로 둔다. */
+    /* 🚨 Lying flat (screen to the sky) leaves almost no gravity in the
+     * screen plane. Forcing a direction out of that spins on noise — just
+     * call it down. */
     if (dlen < 120.0f) { dirx = 0.0f; diry = 1.0f; }
     else               { dirx /= dlen; diry /= dlen; }
 
-    /* 세기 — 가만히 들고 있으면 1g 라 1.0 이다. 흔들면 위아래로 출렁인다.
-     * 너무 크면 입자가 이웃을 뛰어넘어 찢어지므로 위아래를 막는다. */
+    /* Magnitude — held still it is 1 g, so 1.0. Shaking swings it either way.
+     * Too large and particles jump past their neighbours and the water tears,
+     * so it is clamped both ends. */
     float mag = 1.0f;
     if (have) {
         mag = sqrtf(ax * ax + ay * ay + az * az) / 1000.0f;
@@ -966,97 +1017,107 @@ static void step(lv_timer_t *t)
         if (mag > 2.6f)  mag = 2.6f;
     }
 
-    /* ── 어느 방향으로 흔들든 잡는다 ─────────────────────────
-     * 🚨 세기만 쓰면 화면 정면(Z) 으로 찌를 때 물이 눌리기만 하고 안 튄다.
-     * 방향이 없는 힘이라 그렇다. 축마다 '갑자기 변한 양'을 따로 재서
-     * 그만큼 물을 민다:
-     *   가로·세로(x,y) 로 채면 → 그 반대로 쏠린다 (통을 옆으로 친 것)
-     *   정면(z) 으로 찌르면    → 방향이 없으니 사방으로 튄다
-     * 통을 실제로 흔들 때 물이 벽을 때리는 게 이 힘이다. */
+    /* ── catching a shake in any direction ───────────────────
+     * 🚨 Magnitude alone means poking it straight at the screen (Z) presses
+     * the water down but never splashes it, because that force has no
+     * direction. Each axis is measured for "how suddenly did this change" and
+     * the water is pushed by that:
+     *   a flick along x or y  -> it surges the other way (the bowl was struck
+     *                            sideways)
+     *   a poke along z        -> no direction, so it scatters outward
+     * This is the force that makes water hit the wall when a bowl is shaken. */
     static float px_, py_, pz_;
     static bool  pfirst = true;
     float jx = 0, jy = 0, jz = 0;
     if (have) {
         if (pfirst) { px_ = ax; py_ = ay; pz_ = az; pfirst = false; }
         jx = ax - px_; jy = ay - py_; jz = az - pz_;
-        /* 🚨 문턱만 두고 넘긴 양을 곧바로 비례해 먹이면, 문턱을 아주 조금
-         * 넘긴 작은 움직임도 그 양만큼 그대로 들어간다 — "살짝만 움직여도
-         * 물이 너무 거세게" 가 그것이다(0910 제보).
-         * 넘긴 양을 제곱꼴로 준다: 조금 넘으면 거의 안 먹고, 크게 넘으면
-         * 그대로 먹는다. 문턱에서 값이 뚝 끊기지도 않는다(0 에서 이어진다). */
+        /* 🚨 With a plain threshold and a proportional response, a small
+         * movement barely over the line still delivers exactly that much —
+         * "the slightest movement makes the water go wild".
+         * The excess is fed in squared instead: just over does almost
+         * nothing, well over does the full amount. And it does not jump at
+         * the threshold, since it joins at zero. */
         jx = shake_curve(jx); jy = shake_curve(jy); jz = shake_curve(jz);
         px_ = ax; py_ = ay; pz_ = az;
     }
-    /* 축 대응은 구슬과 같다 — x 가 화면 세로, y 가 화면 가로 */
-    /* 🚨 흔들면 확 흩어져서 "먼지" 로 보였다(0910). 세기를 절반으로 줄인다 —
-     * 무거운 것은 같은 힘으로 흔들어도 덜 날아간다. */
+    /* The axis mapping is the marble's: x is the screen's vertical, y the horizontal */
+    /* 🚨 Shaking scattered it so widely it looked like dust. The strength is
+     * halved — heavy things travel less for the same shake. */
     float kick_x = -jy * 1.1f, kick_y = -jx * 1.1f;
-    float burst  = fabsf(jz) * 1.3f;      /* 정면으로 찌른 힘 */
-    /* 🚨 중력을 1400 → 1100 으로 낮췄던 것을 되돌린다. 그건 틀린 처방이었다 —
-     * **중력을 낮추면 무거워지는 게 아니라 달에 간 것처럼 둥둥 뜬다.** 먼지로
-     * 보인 데엔 그 몫이 크다.
-     * 무게감은 세 가지에서 온다: (1) 떨어질 땐 제대로 빨리 떨어질 것,
-     * (2) 흔들어도 덜 날아갈 것(위의 세기), (3) 어느 쪽이 아래인지 늦게 알
-     * 것(아래의 관성). 중력은 (1) 담당이라 오히려 올려야 한다. */
+    float burst  = fabsf(jz) * 1.3f;      /* the straight-at-the-screen poke */
+    /* 🚨 Gravity was lowered from 1400 to 1100 and then put back. That was
+     * the wrong prescription — **lowering gravity does not make it heavy, it
+     * makes it lunar**, floating about, which is much of why it looked like
+     * dust.
+     * Weight comes from three things: (1) falling properly fast when it
+     * falls, (2) travelling less for a given shake (the strength above), and
+     * (3) being slow to notice which way is down (the inertia below).
+     * Gravity is (1), so if anything it should go up. */
     const float G = 1900.0f;
     float want_x = G * mag * dirx;
     float want_y = G * mag * diry;
-    /* 방향은 조금 늦게 따라가되(물의 관성), 세기는 곧바로 먹인다 —
-     * 흔드는 건 짧은 순간이라 늦추면 아예 안 느껴진다. */
+    /* The direction follows a little behind (the water's inertia) but the
+     * magnitude is applied at once — a shake is brief, and delaying it means
+     * it is never felt. */
     s_gx += (want_x - s_gx) * 12.0f * dt;
     s_gy += (want_y - s_gy) * 12.0f * dt;
     if (have) {
-        /* 🚨 0.55 는 사실상 즉시였다 — 기울이는 순간 물이 어느 쪽이 아래인지
-         * 곧바로 알아버려 통째로 쏠렸다. 그게 가벼워 보이던 큰 이유다.
-         * 물은 무거워서 늦게 안다. 0.22 로 낮춘다. */
+        /* 🚨 0.55 was effectively instant: tilt it and the water knew which
+         * way was down immediately and surged all at once. That was a large
+         * part of why it felt light. Water is heavy and finds out late. 0.22. */
         s_gx = s_gx * 0.86f + want_x * 0.14f;
         s_gy = s_gy * 0.86f + want_y * 0.14f;
     }
 
-    /* 배와 그리기가 같은 '아래' 를 쓰게 남겨둔다. */
+    /* Kept so the boat and the renderer use the same "down". */
     {
         float gl = sqrtf(s_gx * s_gx + s_gy * s_gy);
         if (gl > 1.0f) { s_gux = s_gx / gl; s_guy = s_gy / gl; }
     }
 
-    /* 🚨 PBF 는 힘이 아니라 위치를 고치는 방식이라 잘 안 터지지만, 한 걸음이
-     * 너무 길면 입자가 이웃을 뛰어넘어 물이 찢어진다. 8ms 로 쪼갠다.
+    /* 🚨 PBF corrects positions rather than applying forces, so it rarely
+     * blows up — but too long a step lets particles jump past their
+     * neighbours and the water tears. Split into 8 ms steps.
      *
-     * 🚨 걸음 수를 위에서 묶는다. 안 묶으면 느려질수록 dt 가 커지고, dt 가
-     * 커지면 걸음이 늘어 더 느려진다 — 죽음의 나선이다(0909: 초당 8장에서
-     * 한 프레임에 걸음 6개, 물리에만 106ms). */
-    /* 🚨 예전엔 걸음을 2로 묶었다. 물리가 코어0 에서 그리기와 줄 서 있었기
-     * 때문인데, 이제 코어1 로 갔으니 그 이유가 없어졌다. 묶어두면 프레임
-     * 하나에 20ms 어치만 계산해서 물이 4분의 1 속도로 흐른다 — 튀어오르는
-     * 건 순간이라 티가 덜 나는데, 가라앉고 뭉치는 건 시간이 걸리는 일이라
-     * 느린 게 그대로 보인다(0909 제보: "다시 뭉치고 안정화 되는 속도가
-     * 실제 물리랑 다른 것 같아"). 실제 흐른 시간만큼 계산한다. */
+     * 🚨 The number of steps is capped. Without a cap, slower means larger dt,
+     * larger dt means more steps, and more steps means slower — a death
+     * spiral (at 8 fps it was six steps a frame and 106 ms in physics alone). */
+    /* 🚨 The cap used to be two steps, because the physics queued behind
+     * drawing on core 0. It is on core 1 now and that reason is gone. Capped,
+     * a frame only computes 20 ms of water and it flows at a quarter speed —
+     * splashing is brief enough to hide it, but settling and clumping take
+     * time and the slowness is obvious ("the way it settles and comes back
+     * together doesn't match real physics"). Compute the time that actually
+     * passed. */
     int sub = (int)(dt / 0.010f) + 1;
-    /* 🚨 코어1 이 한 프레임 안에 못 끝내면 그리기가 그걸 기다리느라 프레임이
-     * 통째로 무너진다. 걸음 하나가 얼마나 걸리는지는 입자 수·물 상태에 따라
-     * 달라지므로 숫자를 박아두면 안 된다 — 지난 판이 실제로 걸린 시간을 보고
-     * 스스로 정한다.
-     * 🚨 처음엔 60% 로 잡았는데 너무 짰다. 코어0 이 어차피 프레임의 대부분을
-     * 쓰므로(0909: 80ms 중 79ms) 코어1 도 그만큼 써도 서로 안 기다린다.
-     * 90% 로 올린다 — 남은 10% 는 넘기기와 흔들림 때문에 둔다. */
+    /* 🚨 If core 1 cannot finish within a frame, drawing waits for it and the
+     * frame collapses. How long a step takes depends on the particle count
+     * and the state of the water, so the number must not be hard-coded — it
+     * is decided from how long the previous step actually took.
+     * 🚨 60% was the first guess and it was too mean. Core 0 uses most of the
+     * frame anyway (79 of 80 ms), so core 1 can use as much without either
+     * waiting on the other. 90%, leaving 10% for handover and jitter. */
     if (s_phys_us && s_phys_sub > 0) {
         float per = (float)s_phys_us / (float)s_phys_sub / 1000000.0f;
         int room = (int)(dt * 0.9f / (per > 1e-6f ? per : 1e-6f));
         if (room < 1) room = 1;
         if (sub > room) sub = room;
     } else if (sub > 2) {
-        sub = 2;                  /* 아직 재본 적 없다 — 조심해서 시작한다 */
+        sub = 2;                  /* nothing measured yet — start carefully */
     }
     float sdt = dt / sub;
-    /* 🚨 걸음 수만 묶으면 프레임이 느려질 때 한 걸음이 그만큼 굵어진다.
-     * 311ms 프레임에서 한 걸음이 33ms 였고, PBF 는 '움직인 거리 / dt' 로
-     * 속도를 되뽑기 때문에 되뽑힌 속도가 폭주해 물이 통째로 날아갔다.
-     * 걸음 길이를 막는다 — 느리면 물이 느려질 뿐 터지지는 않는다. */
+    /* 🚨 Capping only the step *count* makes each step coarser as the frame
+     * slows. At a 311 ms frame a step was 33 ms, and PBF recovers velocity as
+     * distance over dt — so the recovered velocities ran away and the water
+     * left the bowl entirely. The step length is capped as well: slow just
+     * means slow, not exploded. */
     if (sdt > 0.010f) sdt = 0.010f;
 
-    /* ── 물리를 코어1 에 넘긴다 ───────────────────────────
-     * 🚨 순서가 중요하다. 지난 판이 끝난 것을 보고 → 사본을 뜨고 → 다음 판을
-     * 건다. 사본을 뜨는 동안에는 아무도 배열을 안 건드린다. */
+    /* ── hand the physics to core 1 ───────────────────────
+     * 🚨 The order matters: confirm the previous step finished, take the
+     * copy, then start the next one. Nothing touches the arrays while the
+     * copy is being taken. */
     phys_wait();
 #ifndef BADGE_SIM
     memcpy(s_rx,  s_x,  NP * sizeof(float));
@@ -1068,29 +1129,33 @@ static void step(lv_timer_t *t)
     s_pin.kx = kick_x; s_pin.ky = kick_y; s_pin.burst = burst;
     s_pin.sdt = sdt;   s_pin.sub = sub;
 #ifdef BADGE_SIM
-    phys_round();                 /* 시뮬은 코어가 하나뿐이다 */
+    phys_round();                 /* the simulator has one core */
 #else
     s_inflight = true;
     xSemaphoreGive(s_go);
 #endif
 
 
-    /* ── 배 ─────────────────────────────────────────────────
-     * 주변 입자가 밀어 올리고 실어 나른다. 물이 배를 덮치면 잠긴다. */
-    /* 🚨 예전엔 화면 세로축이 곧 '아래' 였다. 배지를 돌리면 배가 옆으로
-     * 누운 채 엉뚱한 쪽으로 떠올랐다. 중력이 아래인 틀로 바꿔서 같은 계산을
-     * 그대로 한다 — 중력이 화면 아래를 향하면 예전과 똑같이 돈다. */
-    #define BOAT_G 1900.0f               /* 물의 중력과 같게 */
-/* 🚨 선체는 원점 기준 위로 11px(갑판) 아래로 6px(용골)다(paint_boat 좌표).
- * 평형이 원점 9px 아래면 갑판이 수면과 같은 높이가 돼 **돛만 보인다**
- * (0910 제보). 기준선을 올려 원점이 수면보다 3px 위에서 뜨게 한다 —
- * 용골은 3px 잠기고 갑판은 14px 뜬다. 평형 잠김(BOAT_G/K)이 9 이므로
- * 기준선을 12 올리면 bA-top = 9-12 = -3 이 된다. */
+    /* ── the boat ───────────────────────────────────────────
+     * The particles around it hold it up and carry it. Water washing over it
+     * pushes it under.
+     * 🚨 "Down" used to mean the screen's vertical axis, so turning the badge
+     * left the boat lying on its side floating in the wrong direction. The
+     * same arithmetic now runs in a frame where gravity is down — with
+     * gravity pointing down the screen it behaves exactly as before. */
+    #define BOAT_G 1900.0f               /* same gravity as the water */
+/* 🚨 The hull runs 11 px above the origin (deck) and 6 px below (keel), in
+ * paint_boat's coordinates. With equilibrium 9 px below the origin the deck
+ * sits level with the surface and **only the mast shows**. The reference line
+ * is raised so the origin floats 3 px above the surface: keel 3 px under,
+ * deck 14 px clear. Equilibrium draught (BOAT_G/K) is 9, so raising the
+ * reference by 12 gives bA-top = 9-12 = -3. */
 #define BOAT_LIFT   12.0f
-/* 🚨 다 잠기면 뜨는 힘은 더 안 는다(잠긴 부피가 곧 힘인데 부피가 다 찼다).
- * 이걸 안 막으면 **물이 배 위를 덮칠 때 로켓이 된다** — top 은 그 띠에서
- * 제일 높은 알갱이라, 물보라가 배 위로 튀면 top 이 확 올라가고 depth 가
- * 폭발한다(0910 제보). 선체가 다 잠기는 깊이에서 끊는다. */
+/* 🚨 Once fully submerged, buoyancy stops increasing — the force is the
+ * displaced volume and the volume is used up. Without this cap the boat
+ * **becomes a rocket the moment water washes over it**: top is the highest
+ * particle in that band, so spray landing on the deck sends top up and depth
+ * explodes. Clamped at the depth where the hull is fully under. */
 #define BOAT_SUB_MAX 26.0f
     float bC = G_CROSS(s_boat_x, s_boat_y), bA = G_ALONG(s_boat_x, s_boat_y);
     float vC = s_boat_vx * s_guy - s_boat_vy * s_gux;
@@ -1098,12 +1163,13 @@ static void step(lv_timer_t *t)
 
     float svc = 0; int n = 0;
     float top = 1e9f;
-    /* 🚨 배 밑 물이 기울어 있으면 배는 그 비탈을 타고 내려가야 한다. 여태
-     * 안 그랬던 이유: 뜨는 힘을 **중력 축으로만** 줬다. 그러면 수면이 아무리
-     * 기울어도 옆으로 미는 힘이 아예 안 생긴다 — 배가 비탈 위에 붙어 있었다
-     * (0910 제보). 진짜 부력은 수면에 수직이라, 수면이 θ 만큼 기울면
-     * 중력과 합쳐져 비탈 방향으로 g·sinθ 가 남는다.
-     * 그래서 좌우 수면 높이를 따로 재서 기울기를 뽑는다. */
+    /* 🚨 Water tilted under the boat should carry it down the slope. It did
+     * not, because buoyancy was applied **only along gravity** — however
+     * steeply the surface tilted, no sideways force appeared at all and the
+     * boat sat on the slope. Real buoyancy is perpendicular to the surface,
+     * so a surface tilted by theta leaves g*sin(theta) along the slope once
+     * combined with gravity.
+     * The surface height is measured left and right separately to get that. */
     float tl = 1e9f, tr = 1e9f;
     for (int i = 0; i < NP; i++) {
         float c = G_CROSS(s_rx[i], s_ry[i]) - bC;
@@ -1111,84 +1177,94 @@ static void step(lv_timer_t *t)
         svc += s_rvx[i] * s_guy - s_rvy[i] * s_gux;
         n++;
         float a = G_ALONG(s_rx[i], s_ry[i]);
-        if (a < top) top = a;            /* 중력 반대쪽으로 제일 높은 물 */
+        if (a < top) top = a;            /* highest water, against gravity */
         if (c < 0) { if (a < tl) tl = a; }
         else       { if (a < tr) tr = a; }
     }
-    /* 오른쪽이 낮으면(a 가 크면) 양수 — 그쪽으로 미끄러진다. */
+    /* Positive when the right side is lower (a is larger) — it slides that way. */
     float slope = 0.0f;
     if (tl < 1e8f && tr < 1e8f) {
         slope = (tr - tl) / 34.0f;
-        /* 🚨 물보라 한 알갱이가 한쪽에만 튀면 기울기가 터무니없이 커진다.
-         * sinθ 는 원래 1을 못 넘는 값이라 그 언저리에서 끊는다. */
+        /* 🚨 A single droplet of spray on one side gives an absurd slope.
+         * sin(theta) cannot exceed 1, so it is clamped around there. */
         if (slope >  0.6f) slope =  0.6f;
         if (slope < -0.6f) slope = -0.6f;
     }
-    /* 🚨 여태 수면을 향한 스프링 하나로 풀었다. 그게 "공처럼 튄다" 의 정체다 —
-     * **물 밖에서도 수면이 배를 끌어당긴다.** 높은 데서 떨어지면 거리에 비례해
-     * 끌려 내려와 실제보다 세게 꽂히고, 나올 때도 같은 세기로 튕겨 나간다.
-     * 물 안과 밖을 가른다:
-     *     밖 — 그냥 떨어진다 (수면은 아무 힘도 안 준다)
-     *     안 — 잠긴 깊이만큼 뜨고, 깊을수록 물이 세게 붙잡는다
-     * 그러면 첨벙 들어갔다가 묵직하게 올라온다. */
-    /* 🚨 배만 잘게 나눠 푼다. 물 앱은 초당 12장인데, 얕게 뜨게 하려고 부력을
-     * 세게 잡으면 출렁이는 주기가 0.43초까지 짧아진다 — 한 번의 출렁임이
-     * 다섯 프레임이다. 그 해상도에서는 적분기가 진동을 진동으로 못 보고
-     * 뭉개버려서 **통통 튀는 것이 수치적으로 사라진다.** 배는 스칼라 몇
-     * 개라 잘게 푸는 값이 거의 공짜다. 물살 정보(top·svc·n)는 이 프레임의
-     * 것으로 고정해 두고 배만 여러 걸음 걷는다. */
+    /* 🚨 This was one spring toward the surface, and that is what "it bounces
+     * like a ball" was — **the surface pulled the boat even out of the
+     * water**. Dropped from height it was dragged down in proportion to the
+     * distance and hit harder than it should, then thrown back out with the
+     * same force.
+     * In and out of the water are now separate cases:
+     *     out — it simply falls; the surface exerts nothing
+     *     in  — it floats by how deep it is, and deeper water grips harder
+     * That gives a splash going in and a heavy rise coming out. */
+    /* 🚨 The boat alone is sub-stepped. The app runs at about 12 fps, and
+     * buoyancy stiff enough to float it shallow brings the bobbing period
+     * down to 0.43 s — five frames per bob. At that resolution the integrator
+     * cannot see an oscillation as an oscillation and flattens it, so
+     * **the bobbing disappears numerically**. The boat is a handful of
+     * scalars, so sub-stepping it is nearly free. The water state (top, svc,
+     * n) is held fixed for the frame while the boat takes several steps. */
     int bsub = (int)(dt / 0.02f) + 1;
     if (bsub > 8) bsub = 8;
     float bdt = dt / (float)bsub;
 
     for (int bs_i = 0; bs_i < bsub; bs_i++) {
-        /* 기준선을 올린 만큼 더해 준다 — 이 값이 0 이면 '떠 있는 자리' 다. */
+        /* Add back the raised reference — zero here means "floating where it should". */
         float depth = bA - top + BOAT_LIFT;
-        if (depth > BOAT_SUB_MAX) depth = BOAT_SUB_MAX;   /* 다 잠겼다 */
+        if (depth > BOAT_SUB_MAX) depth = BOAT_SUB_MAX;   /* fully under */
         if (n && depth > 0.0f) {
-            /* 🚨 잠긴 깊이에 비례해 뜬다(아르키메데스). 굳기 K 는 흘수가
-             * 정한다 — 가라앉은 깊이에서 무게와 균형이 잡히므로
-             * 흘수 = BOAT_G/K. 9px 를 노려 210(전 76 은 25px 라 잠겨 보였다). */
+            /* 🚨 Buoyancy proportional to submerged depth (Archimedes). The
+             * stiffness K is set by the draught: weight balances at the
+             * settled depth, so draught = BOAT_G/K. 210 aims at 9 px (76 gave
+             * 25 px, which looked sunk). */
             const float K = 210.0f;
-            /* 🚨 감쇠는 "몇 번 통통거리다 잦아드나" 를 정한다. 얕을 땐 약하게
-             * 둬야 물 밖으로 살짝 튀어올랐다 떨어지기를 되풀이한다(감쇠비
-             * 0.14 면 한 번 튈 때마다 높이가 3분의 1로 준다). */
+            /* 🚨 Damping decides how many times it bobs before settling. Kept
+             * light so it keeps hopping just clear of the water and dropping
+             * back (a damping ratio of 0.14 cuts the height to a third per
+             * bounce). */
             float f = depth / BOAT_SUB_MAX;
             float C = 4.0f + 6.0f * f;
-            /* 🚨 들어갈 때와 나올 때의 저항을 다르게 준다. 같으면 첫 다이빙이
-             * 얕아진다(0910 제보: "처음 떨어졌을 때 더 깊이 잠겨야"). 실제로도
-             * 물에 꽂히는 선체는 공기를 끌고 들어가 덜 막히고, 떠오를 때는
-             * 물기둥을 통째로 밀어내며 올라온다. */
-            if (vA > 0.0f) C *= 0.55f;   /* 내려가는 중 */
-            /* 🚨 `vA += (k*오차 - c*vA)*dt` 는 명시적이라 `k*dt` 가 2를 넘으면
-             * 발산한다. 잠긴 형태로 푼다 — 분모가 늘 1보다 커서 안 터진다. */
+            /* 🚨 Resistance differs going in and coming out. Equal values
+             * make the first dive too shallow ("it should go deeper when it
+             * first drops"). A hull entering water drags air down with it and
+             * meets less resistance; coming up it pushes a whole column of
+             * water ahead of it. */
+            if (vA > 0.0f) C *= 0.55f;   /* on the way down */
+            /* 🚨 `vA += (k*error - c*vA)*dt` is explicit and diverges once
+             * k*dt exceeds 2. Solved implicitly instead — the denominator is
+             * always greater than one, so it cannot blow up. */
             float denom = 1.0f + C * bdt + K * bdt * bdt;
             vA = (vA + (BOAT_G - K * depth) * bdt) / denom;
-            /* 🚨 예전엔 여기서 떠오르는 속도를 -260 으로 잘랐다. 그게
-             * **물 밖으로 나오는 힘 자체를 없앴다** — 반동으로 튀어오르는
-             * 일이 일어날 수가 없었다. 자르지 않는다. */
-            /* 물살에 실리는 정도. 3.0 이면 곧바로 실려 나뭇잎처럼 보인다. */
+            /* 🚨 The rising speed used to be clamped at -260, which **removed
+             * the force that gets it out of the water** — bouncing clear
+             * could not happen at all. Not clamped. */
+            /* How much the current carries it. At 3.0 it is swept along like a leaf. */
             vC += ((svc / n) - vC) * (1.3f * bdt / (1.0f + 1.3f * bdt));
-            /* 비탈을 타고 내려간다. g·sinθ 가 그대로 옆 가속도다 — 계수를
-             * 따로 두지 않았다. 물리가 정해주는 값이라 만질 이유가 없다. */
+            /* It runs down the slope. g*sin(theta) is the sideways
+             * acceleration directly — there is no separate coefficient,
+             * because the physics already decided the number. */
             vC += BOAT_G * slope * bdt;
         } else {
-            vA += BOAT_G * bdt;          /* 공중 — 수면은 아무 힘도 안 준다 */
-            /* 공중에선 물살에 거의 안 실린다. 아예 0 으로 두면 옆속도가
-             * 영영 안 죽어서 통 벽을 타고 떠다닌다. */
+            vA += BOAT_G * bdt;          /* airborne — the surface exerts nothing */
+            /* Airborne it is barely carried by the current. Setting it to
+             * zero means sideways speed never decays and it drifts along the
+             * wall of the bowl. */
             if (n) vC += ((svc / n) - vC) * (0.35f * bdt / (1.0f + 0.35f * bdt));
         }
         bA += vA * bdt;
         bC += vC * bdt;
     }
 
-    /* 중력 틀에서 화면 좌표로 되돌린다. G_ALONG/G_CROSS 의 역이다 —
-     * (gux,guy) 가 단위벡터라 회전이므로 이 식이 정확히 맞는다. */
+    /* Back from the gravity frame to screen coordinates — the inverse of
+     * G_ALONG/G_CROSS. (gux,guy) is a unit vector, so this is a rotation and
+     * the expression is exact. */
     s_boat_x = CX + bA * s_gux + bC * s_guy;
     s_boat_y = CY + bA * s_guy - bC * s_gux;
     s_boat_vx = vC * s_guy + vA * s_gux;
     s_boat_vy = -vC * s_gux + vA * s_guy;
-    /* 통 안에 둔다 */
+    /* Keep it inside the bowl */
     float bdx = s_boat_x - CX, bdy = s_boat_y - CY;
     float bd = sqrtf(bdx * bdx + bdy * bdy);
     if (bd > R - 40) {
@@ -1199,31 +1275,36 @@ static void step(lv_timer_t *t)
         s_boat_vy *= -0.3f;
     }
 
-    /* 🔋 잔잔하면 쉰다. 세 번에 한 번만 풀어도 눈에는 똑같고,
-     * 그동안 CPU 는 쉰다. 흔들거나 기울이면 곧바로 돌아온다. */
-    /* 🚨 잔잔하면 세 번에 한 번만 그려 배터리를 아끼는데, 프레임이 이미
-     * 느리면 그게 0.5초에 한 장이 되어 "멈췄다" 로 보인다(0909 제보).
-     * 프레임이 넉넉할 때만 건너뛴다. 느릴 땐 아낄 여유가 없다. */
+    /* 🔋 Rest when it is calm. Solving every third frame looks identical and
+     * lets the CPU idle in between; a shake or a tilt brings it straight back.
+     * 🚨 But when the frame rate is already low, skipping two out of three
+     * becomes one frame every half second and reads as "it froze". Only skip
+     * when there is frame time to spare — when it is slow there is nothing to
+     * save. */
     if (s_still_flag && dt < 0.070f) {
         static uint8_t idle;
         if (++idle % 3) return;
     }
 
-    /* 🚨 어디서 시간을 쓰는지 갈라 봐야 고칠 데를 안다 — 입자 푸는 쪽인가
-     * 화면 만드는 쪽인가. 뭉뚱그린 숫자로는 엉뚱한 데를 깎게 된다. */
+    /* 🚨 Splitting where the time goes is the only way to know what to fix:
+     * solving particles, or building the picture. One combined number sends
+     * you off sharpening the wrong thing. */
     int64_t _tp = esp_timer_get_time();
     build_spans();
     int64_t _ts = esp_timer_get_time();
     paint_img();
-    /* 🚨 화면 전체를 무효화하면 LVGL 이 466줄을 전부 배경칠 → 그림복사 →
-     * DMA 한다. 물은 대개 아래쪽 절반에만 있으니 그 셋을 통째로 두 배 낭비한
-     * 셈이다(0909: 전송 78ms, 그런데 한 장 전송의 하한은 21.7ms 다).
-     * 바뀐 자리만 무효화한다 — 지난번 자리와 이번 자리를 합쳐야 물이 빠진
-     * 자리도 지워진다. 배는 물 밖으로도 나가므로 넉넉히 물린다. */
+    /* 🚨 Invalidating the whole screen makes LVGL background-fill, copy and
+     * DMA all 466 rows. The water is usually in the lower half, so that is
+     * three passes of double waste (transfer was 78 ms, against a floor of
+     * 21.7 ms for one full frame).
+     * Only the changed area is invalidated — the union of last frame's area
+     * and this one's, or the places water has left do not get erased. The
+     * boat leaves the water, so it is given generous margins. */
     {
-        /* 이번에 뭔가 그려질 자리 = 물 띠 + 배가 차지하는 띠.
-         * 🚨 배는 돌면 세로로 길어진다. 돛까지 로컬 y 가 -52~+6 이고 90도
-         * 돌면 그게 가로 길이(-30~+33)로 바뀌므로 넉넉히 ±60 을 준다. */
+        /* What will be drawn this frame = the water band plus the boat's band.
+         * 🚨 The boat is taller when it turns: with the mast its local y runs
+         * -52..+6, and rotated 90 degrees that becomes its horizontal extent
+         * (-30..+33), so ±60 is allowed. */
         int y0 = s_img_y0, y1 = s_img_y1;
         int by0 = (int)s_boat_y - 60, by1 = (int)s_boat_y + 60;
         if (by0 < y0) y0 = by0;
@@ -1231,9 +1312,9 @@ static void step(lv_timer_t *t)
         if (y0 < 0) y0 = 0;
         if (y1 > 465) y1 = 465;
 
-        /* 🚨 지난 프레임이 차지했던 자리를 통째로 합쳐야 한다. 물 띠만
-         * 합쳤더니 배가 지나간 자리와 빠진 물이 한동안 안 지워졌다
-         * (0909 제보: "일부 요소가 지워지는 데 시간이 걸린다"). */
+        /* 🚨 The whole area the previous frame occupied has to be unioned in.
+         * Unioning only the water band left the boat's wake and departed
+         * water on screen for a while ("some things take time to disappear"). */
         static int py0 = 0, py1 = 465;
         int i0 = y0 < py0 ? y0 : py0;
         int i1 = y1 > py1 ? y1 : py1;
@@ -1247,8 +1328,8 @@ static void step(lv_timer_t *t)
     phys += _tp - _t0; span += _ts - _tp; pnt += _te - _ts; cnt++;
     if (!since2) since2 = _te;
     if (_te - since2 >= 3000000) {
-        ESP_LOGI("water", "가름 %u번 — 넘기기 %llu · 토막 %llu · 칠하기 %llu us"
-                 " | 코어1 %u us (걸음 %d)",
+        ESP_LOGI("water", "%u splits — handover %llu, runs %llu, paint %llu us"
+                 " | core1 %u us (%d steps)",
                  (unsigned)cnt, (unsigned long long)(phys / cnt),
                  (unsigned long long)(span / cnt), (unsigned long long)(pnt / cnt),
                  (unsigned)s_phys_us, s_phys_sub);
@@ -1261,7 +1342,7 @@ static void tap_cb(lv_event_t *e)
 {
     lv_event_code_t code = lv_event_get_code(e);
     if (code == LV_EVENT_PRESSING || code == LV_EVENT_PRESSED) {
-        /* 시뮬엔 IMU 가 없다. 손가락 쪽으로 기울인 셈 친다. */
+        /* No IMU in the simulator. Pretend it is tilted toward the finger. */
         lv_indev_t *in = lv_indev_active();
         lv_point_t p = { CX, CY };
         if (in) lv_indev_get_point(in, &p);
@@ -1271,16 +1352,17 @@ static void tap_cb(lv_event_t *e)
     if (code == LV_EVENT_RELEASED) { water_sim_tilt(CX, CY); return; }
 }
 
-/* PSRAM 에서 한꺼번에 잡는다. 못 잡으면 물은 건너뛴다. */
+/* Allocated from PSRAM in one go. If that fails, the water is skipped. */
 static bool alloc_all(void)
 {
     #define GET(v, n) do { v = heap_caps_malloc((n), MALLOC_CAP_SPIRAM); \
                            if (!(v)) return false; } while (0)
-    /* 🚨 입자 배열을 내부 RAM 으로 옮겨봤다가 되돌렸다(0909). 걸음 하나가
-     * 26ms 인 게 PSRAM 을 기다리는 값이라고 봤는데, 옮겨도 27.6ms 로 그대로
-     * 였다 — 기다리는 게 아니라 진짜 계산이 비싼 것이다. 대신 내부 힙이
-     * 89 → 72KB, 최대 덩어리가 50 → 32KB 로 쪼그라들어 그리기가 큰 버퍼를
-     * 못 잡을 위험만 늘었다. 재보고 아니면 되돌린다. */
+    /* 🚨 Moving the particle arrays into internal RAM was tried and reverted.
+     * The theory was that a 26 ms step was waiting on PSRAM, but moving them
+     * left it at 27.6 ms — it is not waiting, the arithmetic really is that
+     * expensive. Meanwhile the internal heap dropped from 89 to 72 KB and the
+     * largest block from 50 to 32 KB, which only raises the risk of drawing
+     * failing to get a large buffer. Measure again before retrying. */
     GET(s_x, NP * 4);      GET(s_y, NP * 4);
     GET(s_px, NP * 4);     GET(s_py, NP * 4);
     GET(s_vx, NP * 4);     GET(s_vy, NP * 4);
@@ -1294,7 +1376,7 @@ static bool alloc_all(void)
     GET(s_cur, 466 * (int)sizeof(int));
     GET(s_scol, 466 * 3 * 2);
 #ifdef BADGE_SIM
-    /* 코어가 하나라 베낄 이유가 없다 — 같은 자리를 가리킨다 */
+    /* One core, so there is nothing to copy — point at the same arrays */
     s_rx = s_x; s_ry = s_y; s_rvx = s_vx; s_rvy = s_vy;
 #else
     GET(s_rx, NP * 4);     GET(s_ry, NP * 4);
@@ -1325,7 +1407,7 @@ static void free_all(void)
     PUT(s_sp0); PUT(s_sp1); PUT(s_spn); PUT(s_sfrac); PUT(s_slope); PUT(s_foam);
     PUT(s_cur); PUT(s_scol);
 #ifdef BADGE_SIM
-    s_rx = s_ry = s_rvx = s_rvy = NULL;      /* 남의 자리를 가리키고 있었다 */
+    s_rx = s_ry = s_rvx = s_rvy = NULL;      /* these were pointing at someone else's memory */
 #else
     PUT(s_rx); PUT(s_ry); PUT(s_rvx); PUT(s_rvy);
 #endif
@@ -1344,7 +1426,7 @@ lv_timer_t *water_start(lv_obj_t *root)
         return NULL;
     }
 
-    /* 아래 절반에 격자로 깐다. 줄마다 반 칸씩 밀어야 줄무늬가 안 보인다. */
+    /* Laid out on a grid in the lower half. Every other row shifts half a cell or it stripes. */
     int n = 0;
     for (int row = 0; row < 44 && n < NP; row++) {
         float y = CY - 14 + row * 10.2f;
@@ -1359,9 +1441,10 @@ lv_timer_t *water_start(lv_obj_t *root)
     }
     for (; n < NP; n++) { s_x[n] = CX; s_y[n] = CY + 120; s_vx[n] = s_vy[n] = 0; }
 
-    /* 🚨 기준 밀도는 이 배치에서 직접 잰다. 상수로 박아두면 입자 수나
-     * 간격을 바꾸는 순간 물이 부풀거나 꺼진다. 가장자리는 이웃이 모자라
-     * 낮게 나오니 안쪽 것들만 센다. */
+    /* 🚨 The reference density is measured from this very arrangement. Hard
+     * coding it means the water swells or collapses the moment the particle
+     * count or spacing changes. Edge particles read low for want of
+     * neighbours, so only the interior is counted. */
     grid_build_from_current();
     float sum = 0; int cnt = 0;
     for (int i = 0; i < NP; i++) {
@@ -1404,15 +1487,15 @@ lv_timer_t *water_start(lv_obj_t *root)
     s_boat_vx = s_boat_vy = 0;
     s_last_ms = 0;
 #ifndef BADGE_SIM
-    /* 🚨 코어1 에 못 박는다. 메인도 BLE 도 코어0 이라 거기가 비어 있다.
-     * 우선순위는 LVGL 보다 낮게 — 물리가 늦어도 화면은 돌아야 한다. */
+    /* 🚨 Pinned to core 1: main and BLE are both on core 0, so it is free.
+     * Priority below LVGL — late physics is better than a frozen display. */
     if (!s_phys) {
         s_go   = xSemaphoreCreateBinary();
         s_done = xSemaphoreCreateBinary();
         s_inflight = false;
         if (!s_go || !s_done ||
             xTaskCreatePinnedToCore(phys_task, "water", 4096, NULL, 3, &s_phys, 1) != pdPASS) {
-            ESP_LOGI("water", "코어1 태스크를 못 띄웠다 — 코어0 에서 같이 돈다");
+            ESP_LOGI("water", "could not start the core-1 task — running on core 0");
             s_phys = NULL;
         }
     }
@@ -1423,33 +1506,33 @@ lv_timer_t *water_start(lv_obj_t *root)
 
 void water_stop(void)
 {
-    s_loop = NULL;               /* 타이머는 부른 쪽이 지운다 */
-    /* 🚨 그림을 먼저 지우고 메모리를 놓는다. 거꾸로 하면 아직 살아 있는
-     * s_field 가 이미 놓아버린 입자 배열을 그리려 든다 — 홈 버튼을 누르면
-     * 그 사이에 한 번 더 그려서 죽었다(0909). 달·지구에서 똑같이 겪고
-     * 고쳤는데 물에서 반복했다. */
+    s_loop = NULL;               /* the caller deletes the timer */
+    /* 🚨 Delete the image before freeing the memory. The other way round
+     * leaves a live s_field trying to draw particle arrays that are already
+     * gone — pressing home drew one more frame in between and died. The same
+     * thing was found and fixed in the globe, and then repeated here. */
     if (s_field) { lv_obj_delete(s_field); s_field = NULL; }
     s_root = s_hint = NULL;
-    /* 🚨 코어1 이 배열을 만지는 중일 수 있다. 판이 끝난 것을 보고 태스크를
-     * 없앤 뒤에 놓는다. 거꾸로 하면 이미 놓은 자리를 만진다 — 그리기에서
-     * 겪은 것과 같은 사고다. */
+    /* 🚨 Core 1 may be in the middle of the arrays. Wait for the step to
+     * finish and delete the task before freeing. The other order writes into
+     * freed memory — the same accident as the drawing one above. */
     phys_wait();
 #ifndef BADGE_SIM
     if (s_phys) { vTaskDelete(s_phys); s_phys = NULL; }
     if (s_go)   { vSemaphoreDelete(s_go);   s_go = NULL; }
     if (s_done) { vSemaphoreDelete(s_done); s_done = NULL; }
 #endif
-    free_all();                  /* PSRAM 을 꼭 돌려준다 */
+    free_all();                  /* always give the PSRAM back */
 }
 
-/* 시뮬에서 손가락 쪽으로 기울어지게 — 실기 IMU 대신 */
+/* Simulator only — tilt toward the finger, standing in for the IMU */
 void water_sim_tilt(int x, int y)
 {
     s_fake_gx = -((float)y - CY) * 4.0f;
     s_fake_gy = -((float)x - CX) * 4.0f;
 }
 
-/* 검증용 — 중력 각도, 배 위치, 통 밖으로 샌 입자 수 */
+/* For tests — gravity angle, boat position, and how many particles escaped the bowl */
 void water_debug(float *deg, float *boat, float *escaped)
 {
     if (deg)  *deg  = atan2f(s_gx, s_gy) / DEG2RAD;

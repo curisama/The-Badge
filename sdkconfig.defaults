@@ -49,7 +49,8 @@ CONFIG_IDF_EXPERIMENTAL_FEATURES=y
 
 
 
-# extra font sizes
+# Sizes this firmware actually uses. Each one costs flash, so they are listed
+# rather than turned on wholesale.
 CONFIG_LV_FONT_MONTSERRAT_32=y
 CONFIG_LV_FONT_MONTSERRAT_40=y
 CONFIG_LV_FONT_MONTSERRAT_48=y

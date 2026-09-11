@@ -91,9 +91,17 @@ grep -q 'sys.platform == "darwin"' sim/build.py \
 # 🚨 The name the badge appears under differs by machine — documenting only Linux leaves people lost elsewhere
 grep -q "cu.usbmodem" tools/setup.sh \
   && ok "the port note matches the machine" || bad "the port note covers only Linux"
-# 🚨 A home-server path written in stops the tool running at all on another machine
-! grep -q "/home/" tools/mkassets.py \
-  && ok "no machine-specific path is written into the asset tool" || bad "a home-server path is written into mkassets.py"
+# 🚨 An absolute path written into the tool stops it running at all on another
+#    machine. Do not check for one particular home directory — that only finds
+#    the one machine it was written on, and puts somebody's username in a public
+#    repository. Any absolute path outside the repo is the fault.
+python3 - <<'EOF' && ok "no machine-specific path is written into the asset tool" || bad "an absolute path is written into mkassets.py"
+import re, sys
+src = open("tools/mkassets.py", encoding="utf-8").read()
+bad = re.findall(r"""["'](/home/[^"']*|/Users/[^"']*|/mnt/[a-z]/[^"']*|[A-Za-z]:\\[^"']*)["']""", src)
+if bad:
+    print("  absolute path in the source:", " · ".join(sorted(set(bad)))); sys.exit(1)
+EOF
 # 🚨 Putting the simulator's LVGL in managed_components makes idf.py refuse it later
 ! grep -q "managed_components/lvgl__lvgl$" tools/setup.sh \
   && ok "the simulator's LVGL lives in sim/lvgl" || bad "the simulator's LVGL is dirtying managed_components"

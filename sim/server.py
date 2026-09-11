@@ -30,12 +30,29 @@ COLS = (SIZE + TILE - 1) // TILE
 
 # 🚨 Screens where everything changes every frame (water, moon, earth) have to
 #    send the whole 434 KB, which at 30fps is 13 MB a second — over anything
-#    but a local network that is the bottleneck. Sending at half resolution cuts it to a quarter
-#    (3.3 MB a second) and the browser scales it up. Nothing is lost for
-#    watching movement, and ?full=1 turns it off when the detail is needed.
+#    but a local network that is the bottleneck. Sending at half resolution
+#    cuts it to a quarter (3.3 MB a second) and the browser scales it up.
+#    Nothing is lost for watching movement, and ?full=1 turns it off when the
+#    detail is needed — the planet maps, say.
+#    Each connection picks its own, so one viewer can watch at full detail
+#    while another stays on half — SIM_SCALE only sets the default.
 SCALE = int(os.environ.get("SIM_SCALE", "2"))     # 1 = full, 2 = half
-TX_SIZE = (SIZE + SCALE - 1) // SCALE
-TX_COLS = (TX_SIZE + TILE - 1) // TILE
+
+def tx_dims(scale):
+    """Transmitted size and tile count for a scale. 🚨 These were globals, which
+    is why ?full=1 was documented for months without existing: there was no way
+    for one connection to use a different size."""
+    tx = (SIZE + scale - 1) // scale
+    return tx, (tx + TILE - 1) // TILE
+
+def want_scale(path):
+    """?full=1 forces full, ?full=0 forces half, neither takes SIM_SCALE.
+    🚨 It has to answer both ways round. Reading only "is full set?" means that
+    with SIM_SCALE=1 the toggle cannot turn anything off."""
+    q = parse_qs(urlparse(path).query).get("full")
+    if not q:
+        return SCALE
+    return 1 if q[0] not in ("0", "", "false") else 2
 PORT = int(os.environ.get("PORT", "8791"))
 
 proc = subprocess.Popen([os.path.join(HERE, "badge_sim"), "--serve"],
@@ -116,7 +133,7 @@ def _diff_tiles_slow(prev, cur):
     return out
 
 
-def diff_tiles(prev, cur):
+def diff_tiles(prev, cur, scale):
     """Extracts only the changed tiles as (tx, ty, w, h, pixels).
 
     🚨 It used to slice and compare row by row per tile in Python. Screens where
@@ -125,25 +142,26 @@ def diff_tiles(prev, cur):
     got noticeably slow ("this is really slow?", 09-09). numpy compares it in
     one go.
     """
+    tx_size, tx_cols = tx_dims(scale)
     if np is None:
         return _diff_tiles_slow(prev, cur)
     ca = np.frombuffer(cur, dtype=np.uint16).reshape(SIZE, SIZE)
-    if SCALE > 1:
-        ca = ca[::SCALE, ::SCALE]        # decimated — free
+    if scale > 1:
+        ca = ca[::scale, ::scale]        # decimated — free
     out = []
     if prev is None:
         changed = None
     else:
         pa = np.frombuffer(prev, dtype=np.uint16).reshape(SIZE, SIZE)
-        if SCALE > 1:
-            pa = pa[::SCALE, ::SCALE]
+        if scale > 1:
+            pa = pa[::scale, ::scale]
         changed = ca != pa
-    for ty in range(TX_COLS):
+    for ty in range(tx_cols):
         y0 = ty * TILE
-        h = min(TILE, TX_SIZE - y0)
-        for tx in range(TX_COLS):
+        h = min(TILE, tx_size - y0)
+        for tx in range(tx_cols):
             x0 = tx * TILE
-            w = min(TILE, TX_SIZE - x0)
+            w = min(TILE, tx_size - x0)
             if changed is not None and not changed[y0:y0 + h, x0:x0 + w].any():
                 continue
             tile = np.ascontiguousarray(ca[y0:y0 + h, x0:x0 + w])
@@ -151,7 +169,7 @@ def diff_tiles(prev, cur):
     return out
 
 
-def ws_loop(sock):
+def ws_loop(sock, scale):
     prev = None
     idle = 0
     while True:
@@ -162,7 +180,7 @@ def ws_loop(sock):
                     return
                 apply_events(msg.decode())
             cur = step_and_raw()
-            tiles = diff_tiles(prev, cur)
+            tiles = diff_tiles(prev, cur, scale)
             prev = cur
             if tiles:
                 ws.send(sock, zlib.compress(b"".join(tiles), 1))
@@ -196,9 +214,21 @@ PAGE = """<!doctype html><meta charset=utf-8>
 <div class=row>
   <button id=boot>BOOT · screen</button>
   <button id=pwr>PWR · home</button>
+  <button id=hd>__HDLABEL__</button>
   <span class=hint id=fps>connecting…</span>
 </div>
 <script>
+/* Half resolution is the default because a screen that changes everywhere
+   costs four times as much at full. The button is here because a query string
+   nobody can see is a feature nobody uses. */
+document.getElementById('hd').onclick = () => {
+  const u = new URL(location.href);
+  /* Set it either way rather than deleting — deleting falls back to whatever
+     the server was started with, which may be the mode we are leaving. */
+  u.searchParams.set('full', __ISFULL__ ? '0' : '1');
+  location.href = u.toString();
+};
+
 const cv = document.getElementById('s');
 const ctx = cv.getContext('2d', {alpha:false});
 const TILE = 64, SIZE = 466;   // SIZE is for touch coordinates — the badge screen size as it is
@@ -228,7 +258,7 @@ function paint(buf){
 
 let sock;
 function connect(){
-  sock = new WebSocket((location.protocol==='https:'?'wss://':'ws://') + location.host + '/ws');
+  sock = new WebSocket((location.protocol==='https:'?'wss://':'ws://') + location.host + '/ws__WSQ__');
   sock.binaryType = 'arraybuffer';
   sock.onmessage = async (e)=>{
     bytes += e.data.byteLength;
@@ -305,12 +335,17 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/":
             # The canvas backing size follows the transmitted resolution. The
             # CSS size is unchanged, so the browser scales it up.
-            html = PAGE.replace("__TX__", str(TX_SIZE))
+            scale = want_scale(self.path)
+            tx_size, _ = tx_dims(scale)
+            html = (PAGE.replace("__TX__", str(tx_size))
+                        .replace("__WSQ__", "?full=1" if scale == 1 else "")
+                        .replace("__HDLABEL__", "HD · on" if scale == 1 else "HD · off")
+                        .replace("__ISFULL__", "true" if scale == 1 else "false"))
             self._send(html.encode(), "text/html; charset=utf-8")
         elif path == "/ws":
             if ws.handshake(self):
                 self.close_connection = True
-                ws_loop(self.connection)
+                ws_loop(self.connection, want_scale(self.path))
         elif path == "/frame":                       # the fallback for places without WebSockets
             ev = parse_qs(urlparse(self.path).query).get("ev", [""])[0]
             raw = step_and_raw(ev)

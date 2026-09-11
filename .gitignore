@@ -1,0 +1,18 @@
+# Your WiFi credentials. Copy main/secrets.example.h over this and fill it in.
+main/secrets.h
+
+# Build output and fetched dependencies
+build/
+sdkconfig
+sdkconfig.old
+dependencies.lock
+managed_components/
+
+# Simulator build output
+sim/badge_sim
+sim/badge_sim.exe
+sim/shots/
+sim/liblvgl.a
+sim/liblvgl.stamp
+sim/lvgl_obj/
+sim/badge_obj/

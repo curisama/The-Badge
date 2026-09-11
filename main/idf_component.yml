@@ -1,0 +1,16 @@
+## IDF Component Manager Manifest File
+dependencies:
+  idf: ">=5.5.0"
+  waveshare/esp32_s3_touch_amoled_1_75c:
+    version: "^3.0.0"
+  waveshare/qmi8658:
+    version: "^2.0.0"
+  lvgl/lvgl:
+    version: "9.5.0"
+    public: true
+  # USB 대용량저장장치로 녹음을 내보낸다. esp_tinyusb(래퍼)가 아니라 raw 를
+  # 쓰는 이유: 래퍼의 MSC 는 진짜 파일시스템을 얹어야 하는데, 우리는 가짜 FAT 을
+  # 직접 지어내므로 tud_msc_* 콜백을 우리가 들고 있어야 한다. 래퍼를 켜면
+  # 그 콜백이 두 번 정의돼 링크가 깨진다.
+  espressif/tinyusb:
+    version: "~0.15.0"

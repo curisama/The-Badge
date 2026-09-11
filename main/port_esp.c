@@ -14,14 +14,15 @@
 #include "esp_log.h"
 #include <stdarg.h>
 
-/* BOOT 버튼 = GPIO0. 런타임엔 일반 버튼으로 쓸 수 있다.
- * PWR은 GPIO가 아니라 AXP2101 PWRON이라 여기서 못 쓴다. */
+/* BOOT is GPIO0 and can be used as an ordinary button at runtime.
+ * PWR is not a GPIO at all — it is the AXP2101's PWRON pin — so it cannot be
+ * read here. */
 #define HOME_BTN_GPIO   GPIO_NUM_0
 
-static volatile bool s_boot_hit;    /* 인터럽트가 걸어두는 눌림 */
-/* 레벨 인터럽트라 누르고 있는 동안 계속 불린다 → 잡자마자 꺼둔다.
- * 다시 켜는 건 손을 뗀 걸 확인한 뒤 아래 태스크가 한다. */
-static volatile uint32_t s_boot_isr_n;   /* 인터럽트가 실제로 물었나 세는 값 */
+static volatile bool s_boot_hit;    /* press flag set by the interrupt */
+/* It is a level interrupt, so it fires continuously while held. It is masked
+ * the moment it is caught; the task below re-arms it after the finger lifts. */
+static volatile uint32_t s_boot_isr_n;   /* how many times the interrupt actually fired */
 static void IRAM_ATTR boot_isr(void *arg)
 {
     (void)arg;
@@ -32,30 +33,34 @@ static void IRAM_ATTR boot_isr(void *arg)
 
 uint32_t port_boot_isr_count(void) { return s_boot_isr_n; }
 
-/* 🚨 BOOT(GPIO0) 를 소프트웨어로 눌러본다. 오픈드레인이라 코드는 LOW 로만
- * 끌 수 있고 HIGH 로는 못 민다 — 사람이 동시에 눌러도 서로 안 싸운다.
- * ⚠️ GPIO0 은 부팅 모드 스트랩 핀이다. 낮게 잡고 있는 동안 리셋이 나면
- *    다운로드 모드로 들어간다. 그래서 짧게만, 그리고 화면이 켜져 있어
- *    라이트슬립에 안 들어간 동안에만 쓴다. 시험용 외엔 부르지 않는다. */
+/* 🚨 Press BOOT (GPIO0) from software. The pin is open drain, so code can
+ * only pull it LOW and never drive it HIGH — a person pressing at the same
+ * time cannot fight it.
+ * ⚠️ GPIO0 is a boot-mode strapping pin. A reset while it is held low enters
+ *    download mode. So it is pulsed briefly, and only while the display is on
+ *    and light sleep is therefore not engaged. Nothing but tests calls it. */
 void port_boot_btn_fake(uint32_t ms)
 {
-    /* 🚨 gpio_config() 를 쓰면 안 된다 — 그 핀의 인터럽트 설정까지 통째로
-     * 초기화해서, 시험 도구가 시험 대상을 꺼버린다(0908 에 실제로 그랬다:
-     * 첫 눌림만 인터럽트가 물고 그 뒤론 0회). 방향만 바꾼다. */
+    /* 🚨 Do not use gpio_config() here — it resets that pin's interrupt
+     * configuration as well, so the test tool switches off the thing it is
+     * testing (it really happened: the first press was caught by the
+     * interrupt and every press after that read zero). Change the direction
+     * only. */
     gpio_set_direction(HOME_BTN_GPIO, GPIO_MODE_INPUT_OUTPUT_OD);
-    gpio_set_level(HOME_BTN_GPIO, 0);            /* 누른다 */
+    gpio_set_level(HOME_BTN_GPIO, 0);            /* press */
     vTaskDelay(pdMS_TO_TICKS(ms));
-    gpio_set_level(HOME_BTN_GPIO, 1);            /* 뗀다(풀업이 올린다) */
+    gpio_set_level(HOME_BTN_GPIO, 1);            /* release (the pull-up raises it) */
     gpio_set_direction(HOME_BTN_GPIO, GPIO_MODE_INPUT);
 }
 #define KV_NS           "badge"
 
 void port_lock(void)
 {
-    /* 0 은 "기다리지 말고 바로 실패"다. LVGL 태스크가 쥐고 있으면 락 없이
-     * 그림을 그리게 된다 — 부팅 로그에 그 에러가 찍혔다. 기다리게 바꾼다. */
+    /* 0 means "fail immediately rather than wait". If the LVGL task holds it,
+     * that means drawing without the lock — which showed up as an error in the
+     * boot log. Wait instead. */
     if (bsp_display_lock(UINT32_MAX) != ESP_OK) {
-        ESP_LOGW("port", "LVGL 락 실패");
+        ESP_LOGW("port", "failed to take the LVGL lock");
     }
 }
 void port_unlock(void) { bsp_display_unlock(); }
@@ -92,20 +97,21 @@ static void (*s_on_press)(void);
 static void (*s_on_hold)(void);
 static void axp_init(void);
 static void batt_track(int pct, bool plugged);
-/* 마지막으로 세운 밝기. BSP 는 이걸 안 기억하고 켤 때마다 100% 로 올린다. */
+/* Last brightness set. The BSP does not remember it and goes to 100% on every power-on. */
 static int s_bright_saved = 45;
 
 static void rtc_write_now(void);
 static void time_synced_now(void);
 
-/* SNTP 가 실제로 시각을 넣었을 때만 불린다. 이 깃발이 유일한 성공 증거다. */
+/* Called only when SNTP actually set the clock. This flag is the only proof of success. */
 static volatile bool s_sntp_done;
 static void sntp_got_time(struct timeval *tv) { (void)tv; s_sntp_done = true; }
 
-/* ── 라이트슬립 잠금 ──────────────────────────────────────────
- * 켜두면 할 일이 없을 때 CPU 가 잔다(대기 전류가 크게 준다). 다만 BLE 연결과
- * I2S 녹음은 자는 동안 끊길 수 있어서, 그 둘이 도는 동안만 못 자게 잡는다.
- * 여러 곳에서 잡을 수 있으니 세어서 마지막이 놓을 때 풀린다. */
+/* ── the light-sleep lock ─────────────────────────────────────
+ * With light sleep on, the CPU sleeps when there is nothing to do and the
+ * standby current drops a long way. But a BLE connection and I2S recording
+ * can both break while it sleeps, so those two hold it awake while they run.
+ * Several things can hold it, so it is counted and released by the last one. */
 #include "esp_pm.h"
 static esp_pm_lock_handle_t s_nosleep;
 static int                  s_nosleep_n;
@@ -132,33 +138,36 @@ static void home_btn_task(void *arg)
     };
     gpio_config(&io);
 
-    /* 🚨 화면이 꺼지면 300ms 마다만 본다. 톡 누르고 떼는 데 100~200ms 라
-     * 눌린 순간이 확인과 확인 사이에 통째로 들어가 안 보였다.
-     * 게다가 그 사이엔 CPU 가 라이트슬립에 들어가 있어서, 그냥 인터럽트만
-     * 걸어놔서는 깨우지도 못한다. 라이트슬립에서 깨우려면 '레벨' 이어야
-     * 한다(엣지는 안 된다) — 그래서 눌림(LOW) 을 깨움 조건으로 준다. */
-    /* 🚨 이미 누가 설치했으면 IDF 가 E 로그를 찍고 INVALID_STATE 를 준다.
-     * 우리한텐 정상인 경우인데 오류로 남아, 진짜 오류를 찾을 때 방해가 된다
-     * (0908 판정 도구가 이걸 잡아냈다). 이 한 번만 조용히 부른다. */
+    /* 🚨 With the display off this was only polled every 300 ms. A tap takes
+     * 100-200 ms, so the whole press could fall between two polls and be
+     * invisible.
+     * On top of that the CPU is in light sleep in between, so an interrupt
+     * alone cannot wake it either. Waking from light sleep requires a *level*
+     * trigger, not an edge — so the press (LOW) is the wake condition. */
+    /* 🚨 If something already installed it, IDF logs an E and returns
+     * INVALID_STATE. That is a normal case for us, but it leaves an error in
+     * the log that gets in the way when hunting a real one. Called quietly,
+     * once. */
     esp_log_level_t lv = esp_log_level_get("gpio");
     esp_log_level_set("gpio", ESP_LOG_NONE);
     esp_err_t ie = gpio_install_isr_service(0);
     esp_log_level_set("gpio", lv);
     if (ie != ESP_OK && ie != ESP_ERR_INVALID_STATE)
-        ESP_LOGW("btn", "인터럽트 서비스 실패 %s — BOOT 는 폴링으로만 잡힌다", esp_err_to_name(ie));
+        ESP_LOGW("btn", "interrupt service failed: %s — BOOT will only be polled", esp_err_to_name(ie));
     gpio_isr_handler_add(HOME_BTN_GPIO, boot_isr, NULL);
     gpio_wakeup_enable(HOME_BTN_GPIO, GPIO_INTR_LOW_LEVEL);
     esp_sleep_enable_gpio_wakeup();
     gpio_intr_enable(HOME_BTN_GPIO);
 
-    /* 짧게 = 홈, 1초 이상 = 화면 끄기 */
+    /* Short press = home, held for a second = display off */
     axp_init();
 
-    /* 🚨 화면이 꺼졌을 때 300ms 마다 본 게 문제였다. 톡 누르고 떼는 데
-     * 100~200ms 라 눌림이 확인과 확인 사이에 통째로 들어갔다.
-     * 그렇다고 전부 빨리 보면 안 된다 — 비싼 건 GPIO 가 아니라 AXP 다(I2C).
-     * 그래서 둘을 나눈다: 핀은 100ms 마다(공짜), AXP 는 300ms 마다(그대로).
-     * 인터럽트가 잡아주면 그보다 먼저 깨지만, 못 잡아도 100ms 면 놓치지 않는다. */
+    /* 🚨 Polling every 300 ms with the display off was the problem: a tap
+     * takes 100-200 ms and could fall entirely between two polls.
+     * Polling everything faster is not the answer either — the expensive part
+     * is not the GPIO, it is the AXP over I2C. So they are split: the pin
+     * every 100 ms (free), the AXP every 300 ms (unchanged). The interrupt
+     * usually gets there first, but even when it misses, 100 ms does not. */
     const int SLICE_ON = 40, SLICE_OFF = 100;
     int prev = 1, held = 0, axp_acc = 0;
     bool fired = false;
@@ -169,12 +178,12 @@ static void home_btn_task(void *arg)
         axp_acc += slice;
         if (!off || axp_acc >= 300) {
             axp_acc = 0;
-            /* PWR 짧게 = 홈. 전원 버튼이 아무 일도 안 하면 아무도 못 찾는다. */
+            /* PWR short = home. A power button that does nothing is a button nobody finds. */
             int pk = port_pwr_key();
             if (pk == 1) {
                 port_lock(); launcher_home(); port_unlock();
             } else if (pk == 2) {
-                /* 안내를 잠깐 보여주고 실제로 끊는다 */
+            /* Show the notice for a moment, then actually cut power */
                 port_lock(); launcher_poweroff_notice(); port_unlock();
                 vTaskDelay(pdMS_TO_TICKS(700));
                 port_power_off();
@@ -183,20 +192,20 @@ static void home_btn_task(void *arg)
 
         if (s_boot_hit) {
             s_boot_hit = false;
-            /* 자고 있을 때 핀이 깨운 것인지 로그로 남긴다. 이건 소프트웨어로는
-             * 만들어낼 수 없는 상황이라(누르는 주체가 CPU 다) 실물 눌림에서만
-             * 확인된다 — 그래서 확인할 수 있게 적어둔다. */
+            /* Log whether the pin was what woke it. This situation cannot be
+             * produced in software (the CPU would be the one pressing), so it
+             * is only ever confirmed by a real press — hence the note. */
             esp_sleep_wakeup_cause_t wc = esp_sleep_get_wakeup_cause();
-            ESP_LOGI("btn", "BOOT 눌림 [인터럽트] (직전에 깨운 것: %s)",
-                     wc == ESP_SLEEP_WAKEUP_GPIO  ? "핀"
-                   : wc == ESP_SLEEP_WAKEUP_TIMER ? "타이머"
-                   : wc == ESP_SLEEP_WAKEUP_UNDEFINED ? "안 잤음" : "기타");
+            ESP_LOGI("btn", "BOOT pressed [interrupt] (last wake source: %s)",
+                     wc == ESP_SLEEP_WAKEUP_GPIO  ? "pin"
+                   : wc == ESP_SLEEP_WAKEUP_TIMER ? "timer"
+                   : wc == ESP_SLEEP_WAKEUP_UNDEFINED ? "did not sleep" : "other");
             if (s_on_press) { port_lock(); s_on_press(); port_unlock(); }
-            /* 손을 뗄 때까지 기다렸다가 인터럽트를 되살린다. 누른 채로 켜면
-             * 레벨 인터럽트가 쉴 새 없이 다시 걸린다. */
+            /* Wait for the finger to lift before re-arming. Re-arming while
+             * it is still held retriggers the level interrupt endlessly. */
             for (int i = 0; i < 60 && gpio_get_level(HOME_BTN_GPIO) == 0; i++)
                 vTaskDelay(pdMS_TO_TICKS(50));
-            vTaskDelay(pdMS_TO_TICKS(60));       /* 튐 방지 */
+            vTaskDelay(pdMS_TO_TICKS(60));       /* debounce */
             gpio_intr_enable(HOME_BTN_GPIO);
             held = 0; fired = false; prev = 1;
             continue;
@@ -210,9 +219,9 @@ static void home_btn_task(void *arg)
                 port_lock(); s_on_hold(); port_unlock();
             }
         } else {
-            /* 인터럽트가 못 잡았을 때를 위한 폴링 경로 */
+            /* The polling path, for when the interrupt missed it */
             if (prev == 0 && !fired && s_on_press) {
-                ESP_LOGI("btn", "BOOT 눌림 [폴링] — 인터럽트가 못 잡았다");
+                ESP_LOGI("btn", "BOOT pressed [polled] — the interrupt missed it");
                 port_lock(); s_on_press(); port_unlock();
             }
             held = 0;
@@ -225,8 +234,9 @@ static void home_btn_task(void *arg)
 
 void port_home_button_start(void (*on_press)(void))
 {
-    /* 뒤집어 쓰니 BOOT 가 손에 잡히는 자리다. 화면 켜고 끄기를 여기로 옮겼다.
-     * PWR 짧게 = 홈. PWR 길게 = 전원 차단(하드웨어라 못 바꾼다). */
+    /* Worn upside down, BOOT is where a finger naturally lands, so display
+     * on/off moved here. PWR short = home; PWR held = power cut, which is
+     * hardware and cannot be changed. */
     (void)on_press;
     s_on_press = launcher_screen_toggle;
     s_on_hold  = NULL;
@@ -235,11 +245,11 @@ void port_home_button_start(void (*on_press)(void))
 
 void port_radio_set(int need)
 {
-    /* TODO: BLE HID on/off. WiFi와 안테나를 공유하므로 동시에 켜지 않는다. */
+    /* TODO: BLE HID on/off. It shares the antenna with WiFi, so never both at once. */
     ESP_LOGI("radio", "need=%d", need);
 }
 
-/* ── 에뮬레이터 지원 ─────────────────────────────────────────── */
+/* ── emulator support ─────────────────────────────────────────── */
 #include "esp_timer.h"
 #include <time.h>
 #include <stdlib.h>
@@ -252,8 +262,8 @@ uint32_t port_micros(void) { return (uint32_t)esp_timer_get_time(); }
 
 void port_delay_us(uint32_t us)
 {
-    /* 1ms 넘으면 태스크를 재우고, 짧으면 그냥 돌린다.
-     * 다마고치 CPU는 32768Hz라 한 사이클이 30us — 재울 만큼 길지 않다. */
+    /* Yield the task for anything over a millisecond; spin for less.
+     * At 32768 Hz a cycle is 30 us, which is not worth sleeping for. */
     if (us >= 1000) {
         vTaskDelay(pdMS_TO_TICKS(us / 1000));
         us %= 1000;
@@ -261,9 +271,10 @@ void port_delay_us(uint32_t us)
     if (us) esp_rom_delay_us(us);
 }
 
-/* 뻗는 게 메모리 때문인지 추측으로 못 정한다. 숫자를 남긴다.
- * 내부 RAM 은 512KB 뿐이고 BLE 스택이 크게 먹는다. PSRAM 은 8MB 라 넉넉하다.
- * 큰 덩어리(largest_free_block)가 총량보다 훨씬 작아지면 조각남이다. */
+/* Guessing whether a crash was memory is no way to settle it. Write the
+ * numbers down. Internal RAM is only 512 KB and the BLE stack takes a large
+ * share of it; PSRAM is 8 MB and roomy. When the largest free block falls far
+ * below the total, that is fragmentation. */
 void port_heap_report(const char *when)
 {
     size_t i_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
@@ -271,11 +282,11 @@ void port_heap_report(const char *when)
     size_t i_min  = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
     size_t p_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
 
-    ESP_LOGI("heap", "%-10s 내부 %uKB(최대덩어리 %uKB, 최저 %uKB) PSRAM %uKB",
+    ESP_LOGI("heap", "%-10s internal %uKB (largest block %uKB, low water %uKB) PSRAM %uKB",
              when, (unsigned)(i_free / 1024), (unsigned)(i_big / 1024),
              (unsigned)(i_min / 1024), (unsigned)(p_free / 1024));
 
-    if (i_free < 24 * 1024) ESP_LOGW("heap", "내부 RAM 이 바닥나고 있다");
+    if (i_free < 24 * 1024) ESP_LOGW("heap", "internal RAM is running out");
 }
 
 void *port_big_alloc(size_t n)
@@ -291,9 +302,9 @@ void port_task_start(const char *name, void (*fn)(void *), void *arg, int stack)
     xTaskCreate(fn, name, stack, arg, 5, NULL);
 }
 
-/* ── 소리 ────────────────────────────────────────────────────
- * 다마고치는 "몇 Hz를 켜라/꺼라"가 전부다. 사각파 하나면 그 시절 소리가 난다.
- * ES8311 코덱에 I2S로 밀어넣는다. */
+/* ── sound ───────────────────────────────────────────────────
+ * A square wave at a given frequency is all this needs. It is pushed into the
+ * ES8311 codec over I2S. */
 #include "esp_codec_dev.h"
 
 #define TONE_SR     16000
@@ -308,7 +319,7 @@ static void    codec_close(void);
 static volatile uint32_t s_tone_hz = 1000;
 static volatile bool     s_tone_on;
 static int               s_tone_vol = 60;
-static volatile bool     s_tone_held;   /* 소리 쓰는 앱이 켜져 있나 */
+static volatile bool     s_tone_held;   /* is an app that uses sound open? */
 
 static void tone_task(void *arg)
 {
@@ -319,12 +330,13 @@ static void tone_task(void *arg)
     while (1) {
         if (!s_tone_on || !s_spk) {
             phase = 0;
-            /* 3초 조용하면 코덱을 닫아 버퍼를 돌려준다 */
-            /* 🚨 소리를 낼 때마다 코덱을 열면 첫 소리가 통째로 안 들린다
-             * (0908 실기: 게임에서 절전 뒤 첫 효과음이 빠지고 다음 것부터 남).
-             * 그렇다고 소리 쓰는 앱이 켜진 동안 무한정 붙잡으면 절전이
-             * 무너진다. 붙잡은 동안엔 문턱만 늘린다 — 20초 조용하면 그때는
-             * 놀고 있는 게 아니니 닫는다. */
+            /* 🚨 Opening the codec for every sound loses the first one
+             * entirely (on the board: after a power-saving pause, a game's
+             * first effect was missing and only later ones played). Holding
+             * it open for as long as a sound-using app is open breaks the
+             * power saving instead. While held, only the threshold is
+             * extended — twenty seconds of silence is not idling, so it
+             * closes then. */
             int64_t idle = s_tone_held ? 20000000 : 3000000;
             if (s_codec_open && (tone_muted() || esp_timer_get_time() - s_tone_last_us > idle))
                 codec_close();
@@ -332,7 +344,7 @@ static void tone_task(void *arg)
             continue;
         }
         uint32_t hz = s_tone_hz ? s_tone_hz : 1000;
-        uint32_t period = TONE_SR / hz;          /* 한 주기의 샘플 수 */
+        uint32_t period = TONE_SR / hz;          /* samples in one cycle */
         if (period < 2) period = 2;
         int16_t amp = (int16_t)(9000 * s_tone_vol / 100);
 
@@ -341,7 +353,7 @@ static void tone_task(void *arg)
             if (++phase >= period) phase = 0;
         }
         esp_err_t we = esp_codec_dev_write(s_spk, buf, sizeof(buf));
-    if (we != ESP_OK) { static int c; if (c++ % 50 == 0) ESP_LOGE("tone", "★ 쓰기 실패 %s", esp_err_to_name(we)); }
+    if (we != ESP_OK) { static int c; if (c++ % 50 == 0) ESP_LOGE("tone", "write failed: %s", esp_err_to_name(we)); }
     }
 }
 
@@ -350,15 +362,15 @@ void port_tone_init(void)
     if (s_spk) return;
     s_spk = bsp_audio_codec_speaker_init();
     if (!s_spk) {
-        ESP_LOGW("tone", "스피커 초기화 실패 — 소리 없이 간다");
+        ESP_LOGW("tone", "speaker init failed — carrying on without sound");
         return;
     }
-    xTaskCreate(tone_task, "tone", 3072, NULL, 6, NULL);   /* 코덱은 필요할 때 연다 */
+    xTaskCreate(tone_task, "tone", 3072, NULL, 6, NULL);   /* the codec is opened when needed */
 }
 
 void port_tone_freq(uint32_t hz)  { s_tone_hz = hz; }
-/* 코덱을 열어두면 I2S 버퍼가 계속 잡혀 있다. 소리를 안 낸 지 3초가 지나면
- * 닫고, 필요할 때 다시 연다. 여는 데 얼마나 걸리는지는 로그로 남긴다. */
+/* An open codec holds its I2S buffers. Three seconds without a sound closes
+ * it, and it reopens when needed. How long opening takes goes in the log. */
 static void codec_open(void)
 {
     if (s_codec_open || !s_spk) return;
@@ -366,14 +378,15 @@ static void codec_open(void)
     esp_codec_dev_sample_info_t fs = { .sample_rate = TONE_SR, .channel = 1, .bits_per_sample = 16 };
     esp_err_t oe = esp_codec_dev_open(s_spk, &fs);
     if (oe != ESP_OK) {
-        /* 🚨 열기 실패인데 열렸다고 적어두면, 나중에 닫을 때 안 연 채널을
-         * 끄려 해서 i2s_channel_disable 오류가 난다(자가검사에서 15회). */
-        ESP_LOGW("tone", "스피커 열기 실패 %s — 녹음이 I2S 를 쓰는 중. 소리만 건너뛴다", esp_err_to_name(oe));
+        /* 🚨 Recording a successful open after a failure means later trying
+         * to disable a channel that was never enabled, which produces
+         * i2s_channel_disable errors (fifteen of them in the self-test). */
+        ESP_LOGW("tone", "speaker open failed: %s — recording has the I2S. Skipping sound only", esp_err_to_name(oe));
         return;
     }
     esp_codec_dev_set_out_vol(s_spk, s_tone_vol);
     s_codec_open = true;
-    ESP_LOGI("tone", "코덱 열기 %lld ms", (esp_timer_get_time() - t0) / 1000);
+    ESP_LOGI("tone", "codec opened in %lld ms", (esp_timer_get_time() - t0) / 1000);
 }
 
 static void codec_close(void)
@@ -385,19 +398,20 @@ static void codec_close(void)
 
 void port_tone_enable(bool on)
 {
-    /* 🚨 예전엔 port_tone_init() 을 아무도 안 불러서 s_spk 가 NULL 이었고,
-     * codec_open() 이 조용히 되돌아가 소리가 한 번도 안 났다(0907 에 발견).
-     * 다마고치를 지울 때 초기화 호출까지 같이 날아간 것으로 보인다.
-     * 처음 소리를 낼 때 알아서 올린다 — 안 쓰면 코덱도 안 잡는다. */
-    /* 🚨 꺼놨는데도 코덱을 잡던 것을 막는다(0908 지적). */
+    /* 🚨 Nothing used to call port_tone_init(), so s_spk was NULL,
+     * codec_open() returned quietly, and no sound ever came out at all. The
+     * init call appears to have been deleted along with an app that was
+     * removed. It is brought up on the first sound now — unused, the codec is
+     * never claimed. */
+    /* 🚨 Stops the codec being claimed even while muted. */
     if (on && tone_muted()) { s_tone_on = false; return; }
     if (on && !s_spk) port_tone_init();
     if (on) { codec_open(); s_tone_last_us = esp_timer_get_time(); }
     s_tone_on = on;
 }
-/* 소리를 끄면 볼륨만 0 이 된다 — 그런데 코덱은 그대로 열려 무음을 밀고
- * 있었다(I2S 도 돌고 앰프도 켜진 채). 안 들릴 소리를 내느라 전기를 쓴 셈이다.
- * 볼륨 0 = 아예 건드리지 않는다. */
+/* Muting used to set the volume to zero and leave the codec open, pushing
+ * silence with I2S running and the amplifier on — spending power to produce
+ * something nobody can hear. Volume 0 now means not touching it at all. */
 static bool tone_muted(void) { return s_tone_vol <= 0; }
 
 bool port_tone_codec_open(void) { return s_codec_open; }
@@ -416,26 +430,27 @@ void port_tone_volume(int percent)
 {
     s_tone_vol = percent < 0 ? 0 : (percent > 100 ? 100 : percent);
     if (tone_muted()) {
-        /* 끄는 순간 이미 열려 있던 것도 놓는다. 다음 소리를 기다릴 이유가 없다. */
+        /* Release what is already open at the moment of muting. No reason to wait for the next sound. */
         s_tone_on = false;
         s_tone_held = false;
-        return;                 /* 닫는 건 tone 태스크가 한다(같은 데서만 만진다) */
+        return;                 /* the tone task does the closing, so only one place touches it */
     }
     if (s_spk) esp_codec_dev_set_out_vol(s_spk, s_tone_vol);
 }
 
 void port_brightness_set(int percent)
 {
-    if (percent < 1) percent = 1;      /* 0 은 "꺼짐"이라 설정으로 못 가게 */
+    if (percent < 1) percent = 1;      /* 0 means "off", which Settings must not be able to reach */
     if (percent > 100) percent = 100;
     s_bright_saved = percent;
     badge_display_brightness(percent);
 }
 int  port_brightness_get(void)        { return s_bright_saved; }
 
-/* ── 시각 맞추기 ──────────────────────────────────────────────
- * WiFi를 켜서 SNTP로 맞추고 바로 끈다. 상시 접속할 이유가 없고,
- * WiFi와 BLE는 안테나를 나눠 쓰기 때문에 켜두면 마우스가 굼떠진다. */
+/* ── setting the clock ────────────────────────────────────────
+ * Bring WiFi up, set the clock over SNTP, take it down again. There is no
+ * reason to stay connected, and WiFi shares the antenna with BLE, so leaving
+ * it on makes the mouse sluggish. */
 #include "esp_wifi.h"
 #include "esp_netif.h"
 #include "esp_event.h"
@@ -449,7 +464,7 @@ int  port_brightness_get(void)        { return s_bright_saved; }
 #ifndef BADGE_WIFI_PASS
 #   define BADGE_WIFI_PASS ""
 #endif
-/* 여러 곳을 오가면 여기에 더 적는다. 안 적으면 그 칸은 없는 것으로 친다. */
+/* Add more here to cover more places. A slot with nothing in it is treated as absent. */
 #ifndef BADGE_WIFI_SSID2
 #   define BADGE_WIFI_SSID2 ""
 #endif
@@ -463,43 +478,47 @@ int  port_brightness_get(void)        { return s_bright_saved; }
 #   define BADGE_WIFI_PASS3 ""
 #endif
 
-/* ── 접속정보는 배지에 저장해 둔다 ──────────────────────────
- * 🚨 코드에 박아 두면, secrets.h 가 없는 컴퓨터(회사 등)에서 구웠을 때
- * 배지가 WiFi 를 통째로 잃는다. 게다가 예전 예제엔 "여기에 SSID" 같은
- * 글자가 있어서 그걸로 esp_wifi_set_config 를 부르면 **배지에 저장돼
- * 있던 멀쩡한 접속정보까지 덮어썼다**(0909 지적).
+/* ── credentials live on the badge ───────────────────────────
+ * 🚨 Hard-coding them means a badge flashed from a machine without secrets.h
+ * (the one at work, say) loses WiFi entirely. Worse, an older example file
+ * had placeholder text in it, and calling esp_wifi_set_config with that
+ * **overwrote the perfectly good credentials stored on the badge**.
  *
- * NVS 는 구워도 살아남는다. 그러니 여기 한 번 넣어두고 그걸 쓴다.
- * secrets.h 에 값이 있으면 구울 때 새로 넣고(집에서 굽는 경우),
- * 비어 있으면 저장된 것을 그대로 쓴다(회사에서 굽는 경우). */
+ * NVS survives reflashing, so they are written once and read from there.
+ * With values in secrets.h they are seeded at flash time (flashing from
+ * home); with it empty, whatever is stored is used as-is (flashing from
+ * anywhere else). */
 #define WIFI_NS  "badge"
-/* WIFI_SLOTS 는 port.h 가 정한다 — 화면 쪽도 같은 값을 봐야 한다 */
+/* WIFI_SLOTS is defined in port.h — the UI has to see the same number */
 
-/* 🚨 예전엔 secrets.h 값이 배지에 저장된 것을 **매 부팅마다 덮었다.** 화면에서
- * WiFi 를 넣을 방법이 없던 시절엔 그게 맞았는데, 키패드가 생긴 뒤로는 화면에서
- * 넣은 것이 재부팅하면 secrets.h 값으로 되돌아간다(0911 제보: "실제로 안 붙은
- * 것 같은데"). **비어 있을 때만 넣는다.**
- * 그래도 원래 목적은 그대로다 — 새 배지에 처음 구우면 씨앗이 들어가고,
- * secrets.h 가 빈 컴퓨터에서 구워도 배지에 있던 것이 안 지워진다.
- * 🚨 secrets.h 를 고쳐 다시 넣고 싶으면 화면에서 그 칸을 비우고 구워라. */
+/* 🚨 The values from secrets.h used to overwrite what was on the badge **on
+ * every boot**. With no way to enter WiFi on the device that was right, but
+ * once there was a keypad, anything typed on screen reverted to secrets.h on
+ * the next reboot ("I don't think it actually connected"). **Only fill empty
+ * slots.**
+ * The original purpose still holds: a brand-new badge gets the seed on its
+ * first flash, and flashing from a machine with an empty secrets.h does not
+ * erase what the badge already had.
+ * 🚨 To push a new value from secrets.h, clear that slot on the device first,
+ * then flash. */
 static void creds_seed(const char *key, const char *val)
 {
-    if (!val || !val[0]) return;             /* 비었으면 건드리지 않는다 */
+    if (!val || !val[0]) return;             /* empty means leave it alone */
     nvs_handle_t nh;
     if (nvs_open(WIFI_NS, NVS_READWRITE, &nh) != ESP_OK) return;
     char old[64] = "";
     size_t n = sizeof old;
     if (nvs_get_str(nh, key, old, &n) == ESP_OK && old[0]) {
-        nvs_close(nh);                       /* 이미 들어 있다 — 안 건드린다 */
+        nvs_close(nh);                       /* already set — do not touch */
         return;
     }
     nvs_set_str(nh, key, val);
     nvs_commit(nh);
-    ESP_LOGI("wifi", "%s 를 배지에 처음 넣었다", key);
+    ESP_LOGI("wifi", "seeded %s onto the badge", key);
     nvs_close(nh);
 }
 
-/* 저장된 값을 준다. 없으면 빈 문자열. */
+/* Returns the stored value, or an empty string. */
 static void creds_get(const char *key, char *out, size_t cap)
 {
     out[0] = '\0';
@@ -510,9 +529,9 @@ static void creds_get(const char *key, char *out, size_t cap)
     nvs_close(nh);
 }
 
-/* 🚨 1번 칸은 옛 키 이름을 그대로 쓴다("wifi_ssid"). 이름을 바꾸면 배지에
- * 이미 들어 있는 집 WiFi 가 사라진다 — NVS 는 구워도 살아남는 게 요점인데
- * 키를 갈아버리면 그 요점이 무너진다. */
+/* 🚨 Slot 1 keeps the old key name ("wifi_ssid"). Renaming it would lose the
+ * network already stored on the badge — the whole point of NVS is that it
+ * survives reflashing, and changing the key throws that away. */
 static void slot_key(char *out, size_t cap, const char *base, int i)
 {
     if (i == 0) snprintf(out, cap, "%s", base);
@@ -537,7 +556,7 @@ void badge_creds_init(void)
     creds_seed("wifi_pass3", BADGE_WIFI_PASS3);
 }
 
-/* 한 칸이라도 채워져 있나 */
+/* Is any slot filled in? */
 bool badge_creds_wifi_any(void)
 {
     char s2[33], p2[65];
@@ -554,24 +573,26 @@ bool badge_creds_wifi(char *ssid, size_t ss, char *pass, size_t ps)
 }
 
 
-/* 🚨 WiFi 를 올린 **뒤에** 부른다. 우리 칸이 비어 있으면 WiFi 스택이 지난번에
- * 저장해 둔 것을 가져다 쓴다 — 그래야 "집에서 한 번 구워 씨를 뿌린 다음에만
- * 회사에서 구울 수 있다" 는 순서 의존이 없어진다. 가져왔으면 우리 칸에도
- * 적어둔다.
- * ⏳ 스택이 저장해 둔 것을 정말 돌려주는지는 **기기에서 안 재봤다**(0909,
- *    배지를 들고 나감). 안 되면 로그에 "가져올 것도 없다" 가 찍힌다. */
-/* 저장된 것 중 **지금 실제로 잡히는** 것을 고른다.
+/* 🚨 Call this **after** WiFi is up. When our slots are empty, whatever the
+ * WiFi stack saved last time is used — which removes the ordering dependency
+ * of "you can only flash at work after seeding it once at home". Anything
+ * recovered is written into our slots too.
+ * ⏳ Whether the stack really hands back what it stored has **not been tested
+ *    on the board**. If it does not, the log says there was nothing to take. */
+/* Pick whichever stored network is **actually in range right now**.
  *
- * 🚨 순서대로 붙어보는 방식은 쓰지 않았다. 없는 망에 붙으려다 실패하는 데
- * 한 번에 5~10초가 날아가서, 밖에 있을 때마다 집 WiFi 를 먼저 기다리게 된다.
- * 한 번 훑는 데는 1~2초면 되고 헛된 시도가 없어 결과적으로 더 빠르다.
+ * 🚨 Trying them in order was deliberately not done. Failing to join a
+ * network that is not there costs 5-10 seconds each time, so being away from
+ * home would mean waiting for the home network first, every time. One scan
+ * takes a second or two and wastes no attempts, which makes it faster in
+ * practice.
  *
- * 🚨 훑으려면 WiFi 가 이미 올라와 있어야 한다(esp_wifi_start 뒤에 부를 것).
- * 그래서 접속정보를 고르는 자리가 esp_wifi_start **뒤로** 옮겨졌다 —
- * 예전엔 올리기 전에 골랐다. */
-/* ── 화면에서 부르는 훑기 ──────────────────────────────────── */
+ * 🚨 Scanning requires WiFi to be up already, so this must be called after
+ * esp_wifi_start — which is why choosing credentials moved to **after** the
+ * start. It used to happen before. */
+/* ── the scan the UI calls ─────────────────────────────────── */
 static wifi_found_t  s_scan[WIFI_SCAN_MAX];
-static volatile int  s_scan_n = -1;      /* -1 = 도는 중 */
+static volatile int  s_scan_n = -1;      /* -1 = still scanning */
 static volatile bool s_scan_busy;
 
 static void scan_task(void *arg)
@@ -594,11 +615,11 @@ static void scan_task(void *arg)
                     if (ap) {
                         esp_wifi_scan_get_ap_records(&want, ap);
                         for (int i = 0; i < want; i++) {
-                            if (!ap[i].ssid[0]) continue;   /* 숨긴 망은 고를 수 없다 */
+                            if (!ap[i].ssid[0]) continue;   /* a hidden network cannot be chosen */
                             snprintf(s_scan[found].ssid, sizeof s_scan[found].ssid,
                                      "%s", (const char *)ap[i].ssid);
                             s_scan[found].rssi = ap[i].rssi;
-                            /* 이미 저장된 것인지 표시해 준다 */
+                            /* Mark the ones already stored */
                             s_scan[found].saved = 0;
                             for (int b = 0; b < WIFI_SLOTS; b++) {
                                 char s2[33], p2[65];
@@ -620,7 +641,7 @@ static void scan_task(void *arg)
         }
         badge_wifi_give();
     }
-    ESP_LOGI("wifi", "훑기 끝 — %d개", found);
+    ESP_LOGI("wifi", "scan finished — %d networks", found);
     s_scan_n = found;
     s_scan_busy = false;
     vTaskDelete(NULL);
@@ -643,7 +664,7 @@ int port_wifi_scan_result(wifi_found_t *out, int max)
     return n;
 }
 
-/* ── 붙어보기 ──────────────────────────────────────────────── */
+/* ── trying to join ────────────────────────────────────────── */
 static char          s_try_ssid[33], s_try_pass[65];
 static volatile int  s_try_state = WIFI_TRY_FAIL;
 static volatile bool s_try_busy;
@@ -663,10 +684,10 @@ static void try_task(void *arg)
             esp_wifi_set_config(WIFI_IF_STA, &wc);
             if (esp_wifi_start() == ESP_OK) {
                 esp_wifi_connect();
-                /* 🚨 '붙었다' 의 기준은 주소를 받은 것이다. 링크만 붙고 DHCP 가
-                 * 안 되면 아무것도 못 한다 — 거기까지 봐야 진짜다. */
+                /* 🚨 "Connected" means an address was obtained. A link
+                 * without DHCP can do nothing — that is where the line is. */
                 esp_netif_ip_info_t ip = { 0 };
-                for (int i = 0; i < 30; i++) {          /* 최대 15초 */
+                for (int i = 0; i < 30; i++) {          /* up to 15 seconds */
                     vTaskDelay(pdMS_TO_TICKS(500));
                     if (nif && esp_netif_get_ip_info(nif, &ip) == ESP_OK && ip.ip.addr) {
                         ok = WIFI_TRY_OK;
@@ -688,9 +709,9 @@ static void try_task(void *arg)
             nvs_close(nh);
         }
     }
-    ESP_LOGI("wifi", "붙어보기 %s (SSID %s)",
-             ok == WIFI_TRY_OK ? "성공" : "실패", s_try_ssid);
-    memset(s_try_pass, 0, sizeof s_try_pass);   /* 오래 들고 있을 이유가 없다 */
+    ESP_LOGI("wifi", "join %s (SSID %s)",
+             ok == WIFI_TRY_OK ? "succeeded" : "failed", s_try_ssid);
+    memset(s_try_pass, 0, sizeof s_try_pass);   /* no reason to hold it any longer */
     s_try_state = ok;
     s_try_busy = false;
     vTaskDelete(NULL);
@@ -703,7 +724,7 @@ void port_wifi_try(const char *ssid, const char *pass)
     if (pass) {
         snprintf(s_try_pass, sizeof s_try_pass, "%s", pass);
     } else {
-        /* 저장된 것을 쓴다 — 이미 넣어둔 망을 다시 칠 이유가 없다. */
+        /* Use what is stored — no reason to retype a network already saved. */
         int b = port_wifi_slot_find(s_try_ssid);
         char s2[33];
         s_try_pass[0] = '\0';
@@ -726,7 +747,7 @@ void port_wifi_last_ok(char *ssid, size_t ss)
     creds_get("wifi_last", ssid, ss);
 }
 
-/* ── 칸에 넣고 지우기 ──────────────────────────────────────── */
+/* ── writing and clearing slots ────────────────────────────── */
 static void slot_write(int slot, const char *key, const char *val)
 {
     char k[24];
@@ -744,7 +765,7 @@ void port_wifi_slot_set(int slot, const char *ssid, const char *pass)
     if (slot < 0 || slot >= WIFI_SLOTS) return;
     slot_write(slot, "wifi_ssid", ssid);
     slot_write(slot, "wifi_pass", pass);
-    ESP_LOGI("wifi", "%d번 칸에 넣었다 (SSID %s)", slot + 1, ssid ? ssid : "");
+    ESP_LOGI("wifi", "stored in slot %d (SSID %s)", slot + 1, ssid ? ssid : "");
 }
 
 void port_wifi_slot_clear(int slot)
@@ -752,7 +773,7 @@ void port_wifi_slot_clear(int slot)
     if (slot < 0 || slot >= WIFI_SLOTS) return;
     slot_write(slot, "wifi_ssid", NULL);
     slot_write(slot, "wifi_pass", NULL);
-    ESP_LOGI("wifi", "%d번 칸을 비웠다", slot + 1);
+    ESP_LOGI("wifi", "cleared slot %d", slot + 1);
 }
 
 int port_wifi_slot_find(const char *ssid)
@@ -772,8 +793,9 @@ int port_wifi_slot_free(void)
     char s2[33], p2[65];
     for (int i = 0; i < WIFI_SLOTS; i++)
         if (!creds_wifi_slot(i, s2, sizeof s2, p2, sizeof p2)) return i;
-    /* 🚨 다 찼으면 마지막 칸을 민다. 1번은 secrets.h 씨앗이 들어가는 자리라
-     * 되도록 남긴다 — 그게 없으면 새 배지가 아무 데도 못 붙는다. */
+    /* 🚨 When full, push out the last slot. Slot 1 is where the secrets.h
+     * seed lands, so it is kept if possible — without it a new badge has
+     * nothing to join at all. */
     return WIFI_SLOTS - 1;
 }
 
@@ -781,7 +803,7 @@ bool port_wifi_slot_get(int slot, char *ssid, size_t ss)
 {
     char p2[65];
     if (slot < 0 || slot >= WIFI_SLOTS) { if (ss) ssid[0] = '\0'; return false; }
-    /* 🚨 비밀번호는 받아만 오고 버린다. 화면으로 내보내지 않는다. */
+    /* 🚨 The password is taken and discarded. It is never returned to the UI. */
     bool ok = creds_wifi_slot(slot, ssid, ss, p2, sizeof p2);
     memset(p2, 0, sizeof p2);
     return ok;
@@ -791,13 +813,14 @@ bool badge_wifi_pick(char *ssid, size_t ss, char *pass, size_t ps)
 {
     wifi_scan_config_t sc = { 0 };
     if (esp_wifi_scan_start(&sc, true) != ESP_OK) {
-        ESP_LOGW("wifi", "훑기 실패 — 1번 칸으로 그냥 간다");
+        ESP_LOGW("wifi", "scan failed — falling back to slot 1");
         return badge_creds_wifi_live(ssid, ss, pass, ps);
     }
     uint16_t got = 0;
     esp_wifi_scan_get_ap_num(&got);
-    /* 🚨 내부 RAM 이 얇다(BLE 가 떠 있으면 20KB 대). 한 칸이 80바이트쯤이라
-     * 16개면 1.3KB — 이 정도로 끊는다. 신호 센 것부터 오므로 손해가 적다. */
+    /* 🚨 Internal RAM is thin (twenty-odd KB with BLE up). An entry is about
+     * 80 bytes, so sixteen is 1.3 KB — that is the cut-off. They arrive
+     * strongest first, so little is lost. */
     uint16_t want = got > 16 ? 16 : got;
     wifi_ap_record_t *ap = want ? calloc(want, sizeof *ap) : NULL;
     if (ap) esp_wifi_scan_get_ap_records(&want, ap);
@@ -823,15 +846,15 @@ bool badge_wifi_pick(char *ssid, size_t ss, char *pass, size_t ps)
     esp_wifi_scan_stop();
 
     if (best >= 0) {
-        ESP_LOGI("wifi", "훑어보니 %d개 — %s 로 간다 (%ddBm, %d번 칸)",
+        ESP_LOGI("wifi", "scan found %d — using %s (%d dBm, slot %d)",
                  (int)got, bs, best_rssi, best + 1);
         snprintf(ssid, ss, "%s", bs);
         snprintf(pass, ps, "%s", bp);
         return true;
     }
-    /* 🚨 하나도 안 잡혀도 포기하진 않는다 — 숨긴 망이거나 훑는 순간에만
-     * 안 보였을 수 있다. 1번 칸으로 한 번은 시도한다. */
-    ESP_LOGW("wifi", "훑은 %d개 중 아는 게 없다 — 1번 칸으로 시도", (int)got);
+    /* 🚨 Finding nothing is not a reason to give up — it may be hidden, or
+     * simply missed during that scan. Slot 1 gets one attempt. */
+    ESP_LOGW("wifi", "none of the %d scanned are known — trying slot 1", (int)got);
     return badge_creds_wifi_live(ssid, ss, pass, ps);
 }
 
@@ -840,30 +863,31 @@ bool badge_creds_wifi_live(char *ssid, size_t ss, char *pass, size_t ps)
     if (badge_creds_wifi(ssid, ss, pass, ps)) return true;
     wifi_config_t wc = { 0 };
     if (esp_wifi_get_config(WIFI_IF_STA, &wc) != ESP_OK || !wc.sta.ssid[0]) {
-        ESP_LOGW("wifi", "배지에 접속정보가 없고 가져올 것도 없다");
+        ESP_LOGW("wifi", "no credentials on the badge and nothing to recover");
         return false;
     }
     snprintf(ssid, ss, "%s", (const char *)wc.sta.ssid);
     snprintf(pass, ps, "%s", (const char *)wc.sta.password);
     creds_seed("wifi_ssid", ssid);
     creds_seed("wifi_pass", pass);
-    ESP_LOGI("wifi", "스택이 저장해 둔 접속정보를 가져왔다 (SSID %s)", ssid);
+    ESP_LOGI("wifi", "recovered the credentials the stack had stored (SSID %s)", ssid);
     return true;
 }
 
 static volatile net_state_t s_net = NET_IDLE;
 
-/* 🚨 예전엔 `#if !defined(BADGE_WIFI_SSID)` 로 갈랐다. 이제 접속정보는
- * 컴파일 때가 아니라 배지에 있으므로, 있는지 없는지는 돌면서 봐야 한다. */
-/* 🚨 esp_netif_create_default_wifi_sta() 는 두 번 부르면 assert 로 뻗는다
- * (0907 자가검사에서 두 번째 업로드 때 잡혔다). 시각 동기와 녹음 업로드가
- * 둘 다 WiFi 를 쓰므로 여기 한 곳에서만 만들고 나눠 쓴다. 만든 netif 는
- * 지우지 않는다 — 지웠다 다시 만드는 것도 같은 함정이다. */
-/* 🚨 WiFi 는 한 번에 하나만 쓴다.
- * 시각 동기(timesync)와 녹음 업로드(recup)가 각자 esp_wifi_init 을 부르는데,
- * 겹치면 같은 하드웨어를 두 번 올리게 된다. 부팅 때 시각 동기가 늦어지고
- * 30초 업로드 폴링이 겹치면 실제로 만나는 상황이다.
- * 먼저 잡은 쪽이 쓰고 나머지는 물러난다 — 어차피 둘 다 나중에 다시 온다. */
+/* 🚨 This used to branch on `#if !defined(BADGE_WIFI_SSID)`. Credentials now
+ * live on the badge rather than in the build, so whether there are any is a
+ * runtime question. */
+/* 🚨 esp_netif_create_default_wifi_sta() asserts if called twice (caught by
+ * the self-test on the second upload). Both the clock and the recording
+ * upload used WiFi, so it is created in exactly one place and shared. The
+ * netif is never destroyed — destroying and recreating is the same trap. */
+/* 🚨 Only one user of WiFi at a time.
+ * The clock sync and the upload each called esp_wifi_init, and overlapping
+ * them brings the same hardware up twice. A slow clock sync at boot colliding
+ * with the 30-second upload poll is a situation that really occurs.
+ * Whoever takes it first uses it and the other backs off — both will be back. */
 static SemaphoreHandle_t s_wifi_gate;
 
 bool badge_wifi_take(uint32_t wait_ms)
@@ -874,7 +898,7 @@ bool badge_wifi_take(uint32_t wait_ms)
         if (!s_wifi_gate) s_wifi_gate = xSemaphoreCreateMutex();
         portEXIT_CRITICAL(&mux);
     }
-    if (!s_wifi_gate) return true;          /* 만들지 못했으면 막지 않는다 */
+    if (!s_wifi_gate) return true;          /* if it could not be created, do not block */
     return xSemaphoreTake(s_wifi_gate, pdMS_TO_TICKS(wait_ms)) == pdTRUE;
 }
 
@@ -888,7 +912,7 @@ esp_netif_t *badge_wifi_netif_once(void)
     static esp_netif_t *nif;
     if (!nif) {
         esp_netif_init();
-        esp_event_loop_create_default();      /* 이미 있으면 조용히 실패한다 */
+        esp_event_loop_create_default();      /* fails quietly if one already exists */
         nif = esp_netif_create_default_wifi_sta();
     }
     return nif;
@@ -897,8 +921,8 @@ esp_netif_t *badge_wifi_netif_once(void)
 static void sync_task(void *arg)
 {
     (void)arg;
-    if (!badge_wifi_take(1000)) {           /* 업로드가 쓰는 중이면 물러난다 */
-        ESP_LOGI("net", "WiFi 를 다른 쪽이 쓰는 중 — 시각 동기는 다음에");
+    if (!badge_wifi_take(1000)) {           /* something else has it */
+        ESP_LOGI("net", "WiFi is in use elsewhere — clock sync will wait");
         s_net = NET_IDLE;
         vTaskDelete(NULL);
         return;
@@ -909,21 +933,21 @@ static void sync_task(void *arg)
     badge_wifi_netif_once();
 
     wifi_init_config_t ic = WIFI_INIT_CONFIG_DEFAULT();
-    /* 🚨 못 올렸는데 내리려 들면 0x3001 오류만 두 줄 남고 원인은 안 보인다.
-     * 여기서 이유를 남기고 물러난다. */
+    /* 🚨 Trying to bring it down when it never came up leaves two lines of
+     * 0x3001 and hides the real reason. Log why and back out here. */
     esp_err_t we = esp_wifi_init(&ic);
     if (we != ESP_OK) {
-        ESP_LOGE("net", "★ WiFi 못 올림 %s — 시각 맞추기 포기", esp_err_to_name(we));
+        ESP_LOGE("net", "could not bring WiFi up: %s — giving up on the clock", esp_err_to_name(we));
         s_net = NET_FAIL;
         badge_wifi_give();
         vTaskDelete(NULL);
         return;
     }
-    /* 🚨 훑으려면 먼저 올려야 한다. 그래서 올리고 → 고르고 → 붙는다. */
+    /* 🚨 Scanning needs it up first, so the order is: start, choose, join. */
     esp_wifi_set_mode(WIFI_MODE_STA);
     esp_wifi_start();
     if (!badge_wifi_pick(ss, sizeof ss, pw, sizeof pw)) {
-        ESP_LOGW("net", "WiFi 접속정보가 없다 — 시각 맞추기 건너뜀");
+        ESP_LOGW("net", "no WiFi credentials — skipping the clock");
         s_net = NET_NOCONF;
         esp_wifi_stop();
         esp_wifi_deinit();
@@ -931,22 +955,23 @@ static void sync_task(void *arg)
         vTaskDelete(NULL);
         return;
     }
-    ESP_LOGI("net", "시각 맞추기 시작 (SSID %s)", ss);
+    ESP_LOGI("net", "setting the clock (SSID %s)", ss);
     wifi_config_t wc = { 0 };
     snprintf((char *)wc.sta.ssid, sizeof wc.sta.ssid, "%s", ss);
     snprintf((char *)wc.sta.password, sizeof wc.sta.password, "%s", pw);
     esp_wifi_set_config(WIFI_IF_STA, &wc);
     esp_wifi_connect();
-    ESP_LOGI("net", "WiFi 접속 시도 중");
+    ESP_LOGI("net", "joining WiFi");
 
-    /* 🚨 예전엔 "시각이 2023년 이후면 맞은 것" 으로 성공을 판정했다. 그런데
-     * 부팅할 때 이미 (틀린) 시각이 들어 있으면 **첫 검사에서 곧바로 참**이 된다.
-     * NTP 가 답하기도 전에 성공으로 치고 SNTP 를 꺼버렸다 — 맨 처음 한 번
-     * (시계가 1970년일 때)만 진짜로 작동하고 그 뒤론 계속 헛돌았다.
-     * 0910 에 폰보다 8~9분 빠른 채로 몇 번을 다시 구워도 안 고쳐지던 게 이것이다.
-     * 🚨 "시각이 없을 때만 참인 조건" 을 성공 판정으로 쓰지 마라 — 한 번
-     * 성공하고 나면 그 뒤로 아무 일도 안 하면서 성공했다고 답한다.
-     * SNTP 가 실제로 값을 넣었을 때만 부르는 콜백을 쓴다. */
+    /* 🚨 Success used to be judged as "the clock reads later than 2023". But
+     * if a (wrong) time is already set at boot, that is **true on the first
+     * check** — it declared success before NTP had answered and switched SNTP
+     * off. Only the very first run (with the clock at 1970) actually worked;
+     * every one after that spun for nothing. That is why the badge stayed
+     * eight or nine minutes fast no matter how many times it was reflashed.
+     * 🚨 Never use a condition that is only true when the thing is missing as
+     * a success test — once it succeeds it answers "succeeded" while doing
+     * nothing. Use the callback SNTP invokes when it has actually set a time. */
     s_sntp_done = false;
     esp_sntp_setoperatingmode(ESP_SNTP_OPMODE_POLL);
     esp_sntp_setservername(0, "pool.ntp.org");
@@ -954,55 +979,59 @@ static void sync_task(void *arg)
     esp_sntp_init();
 
     time_t before = time(NULL);
-    /* 최대 20초 기다린다. 안 되면 포기하고 라디오를 끈다. */
+    /* Wait up to twenty seconds, then give up and switch the radio off. */
     for (int i = 0; i < 40; i++) {
         vTaskDelay(pdMS_TO_TICKS(500));
         if (s_sntp_done) break;
     }
     s_net = s_sntp_done ? NET_SYNCED : NET_FAIL;
     if (s_sntp_done) {
-        /* 얼마나 틀어져 있었는지 남긴다 — 잠든 시간을 잘못 세는 만큼이
-         * 여기 그대로 찍힌다. 재동기 주기를 정하는 근거가 된다. */
+        /* Record how far off it was — the error from mis-counting sleep shows
+         * up here directly, and it is what sets the resync interval. */
         long off = (long)(time(NULL) - before);
-        ESP_LOGI("net", "시각 맞췄다 (%+ld초 어긋나 있었다)", off);
+        ESP_LOGI("net", "clock set (%+ld s off)", off);
     }
     if (s_net == NET_SYNCED) {
-        rtc_write_now();          /* 전원 끊겨도 살아남게 */
-        time_synced_now();        /* 다음 재동기 시계를 여기서 다시 센다 */
+        rtc_write_now();          /* so it survives losing power */
+        time_synced_now();        /* the resync clock restarts from here */
     }
 
     esp_sntp_stop();
     esp_wifi_disconnect();
     esp_wifi_stop();
     esp_wifi_deinit();
-    ESP_LOGI("net", "시각 맞추기 %s", s_net == NET_SYNCED ? "성공" : "실패");
+    ESP_LOGI("net", "clock sync %s", s_net == NET_SYNCED ? "succeeded" : "failed");
     badge_wifi_give();
     vTaskDelete(NULL);
 }
 
 void port_time_sync_start(void)
 {
-    /* 배지에 접속정보가 없으면 나갈 데가 없다 */
+    /* With no credentials on the badge there is nowhere to go */
     if (!badge_creds_wifi_any()) { s_net = NET_NOCONF; return; }
     if (s_net == NET_CONNECTING) return;
     xTaskCreate(sync_task, "timesync", 4096, NULL, 4, NULL);
 }
 
-/* 이 보드엔 RTC 칩이 없다 — 전원이 끊기면 시각이 사라진다.
- * 그래서 부팅하면 알아서 한 번 맞추러 나간다. */
-/* 🚨 예전엔 "시각이 안 맞춰졌을 때만" 맞췄다. 그래서 한 번 맞추고 나면
- * **영영 다시 안 맞췄다** — 이 보드엔 RTC 칩이 없어 시각이 칩 발진기로만
- * 흐르는데, 그게 하루에 몇 분씩 앞선다(0910 제보: 폰보다 3~4분 빠름).
- * 맞춰져 있어도 주기적으로 다시 맞춘다. */
-/* 🚨 6시간은 모자랐다. 이 칩은 자는 동안 흐른 시간을 **내부 RC 발진기**로
- * 재는데(CONFIG_RTC_CLK_SRC_INT_RC), 그게 1% 남짓 틀린다. 배지는 화면이
- * 꺼지면 거의 내내 라이트슬립이라(PM_ENABLE + TICKLESS_IDLE) 그 오차가 그대로
- * 쌓인다 — 0910 에 반나절 만에 8분 앞섰다(8분 / 12시간 = 1.1%, 딱 RC 오차다).
- * 크리스털 드리프트가 아니라 **잠든 시간을 잘못 세는 것**이라 발진기를 바꾸지
- * 않는 한 안 없어진다. 자주 맞춰 오차를 가둔다 — 1시간이면 40초 안쪽이다.
- * 한 번 맞추는 값은 WiFi 8초 남짓(0.3mAh 정도)이라 대기 소모에 묻힌다.
- * ⏭ 근본 처방은 32.768kHz 크리스털을 쓰는 것이다(20ppm). 보드에 그 부품이
- *    있는지 확인이 먼저다 — 없으면 IDF 가 로그를 남기고 RC 로 되돌아간다. */
+/* This board has no RTC chip — losing power loses the time. So it goes and
+ * sets the clock once after boot.
+ * 🚨 It used to sync only "when the clock was not set", which meant that once
+ * set it **never synced again**. With no RTC the time runs off the chip's own
+ * oscillator and gains minutes a day (reported as three or four minutes ahead
+ * of a phone). It resyncs periodically even when already set. */
+/* 🚨 Six hours was not enough. This chip measures elapsed sleep with its
+ * **internal RC oscillator** (CONFIG_RTC_CLK_SRC_INT_RC), which is off by
+ * about 1%. With the display off the badge is in light sleep almost
+ * continuously (PM_ENABLE + TICKLESS_IDLE), so that error accumulates
+ * directly — eight minutes gained in half a day (8 min / 12 h = 1.1%, exactly
+ * the RC error).
+ * This is not crystal drift, it is **mis-counting time asleep**, and it does
+ * not go away without changing the oscillator. Syncing often keeps the error
+ * boxed in: at one hour it stays under forty seconds.
+ * One sync costs about eight seconds of WiFi (roughly 0.3 mAh), which is lost
+ * in the standby draw.
+ * ⏭ The real fix is a 32.768 kHz crystal (20 ppm). First find out whether the
+ *    board has one — without it IDF logs a note and falls back to RC. */
 #define RESYNC_SEC  (1 * 3600)
 static time_t s_last_sync;
 
@@ -1012,23 +1041,24 @@ void port_time_autosync(void)
 {
     time_t now = time(NULL);
     if (now < 1700000000) { port_time_sync_start(); return; }
-    /* 부팅 직후 s_last_sync 가 0 이면 '오래됐다' 로 보고 한 번 맞춘다 */
+    /* Right after boot s_last_sync is 0, which counts as "stale" and syncs once */
     if (s_last_sync == 0 || now - s_last_sync > RESYNC_SEC) port_time_sync_start();
 }
 net_state_t port_time_sync_state(void) { return s_net; }
 
 const char *port_bt_status(void)
 {
-    return "off";        /* BLE HID 붙이면 연결된 호스트 이름을 돌려준다 */
+    return "off";        /* with BLE HID attached this returns the host's name */
 }
 
-/* ── 손가락 수 ────────────────────────────────────────────────
- * BSP 는 터치 핸들을 감춰두지만, LVGL 어댑터가 그걸 indev 의 driver_data 에
- * 넣어둔다. 구조체 앞머리(매직 + 핸들)만 빌려 쓴다 — 매직으로 확인하니
- * 어댑터가 바뀌면 조용히 틀리는 게 아니라 그냥 0을 돌려준다.
+/* ── how many fingers ─────────────────────────────────────────
+ * The BSP hides the touch handle, but the LVGL adapter stores it in the
+ * indev's driver_data. Only the front of that struct (magic plus handle) is
+ * borrowed — the magic is checked, so if the adapter ever changes this
+ * returns zero rather than being quietly wrong.
  *
- * read_data 는 부르지 않는다. 어댑터가 매 주기 이미 읽어놨으므로
- * 캐시된 좌표만 꺼내면 된다 — I2C 를 두 번 때리지 않는다. */
+ * read_data is not called: the adapter has already read this cycle, so only
+ * the cached coordinates are taken and the I2C bus is not hit twice. */
 #include "esp_lcd_touch.h"
 
 #define ADAPTER_TOUCH_CTX_MAGIC  UINT32_C(0x54435458)
@@ -1050,7 +1080,7 @@ int port_touch_count(void)
             adapter_touch_head_t *h = lv_indev_get_driver_data(indev);
             if (h && h->magic == ADAPTER_TOUCH_CTX_MAGIC) tp = h->handle;
         }
-        if (!tp) ESP_LOGW("touch", "터치 핸들을 못 찾았다 — 두 손가락 제스처는 꺼진다");
+        if (!tp) ESP_LOGW("touch", "touch handle not found — two-finger gestures are off");
     }
     if (!tp) return 1;
 
@@ -1060,30 +1090,33 @@ int port_touch_count(void)
     return n;
 }
 
-/* 화면 끄기 = 패널을 진짜로 끈다.
+/* Display off means the panel is actually switched off.
  *
- * 예전엔 밝기만 0 으로 낮췄다(BSP 의 backlight_off 가 그것뿐이다). 화소는
- * 안 빛나지만 드라이버·게이트 스캔·부스트가 계속 돌아서, 실측으로 화면을
- * 껐는데도 켠 것의 44% 가 흘렀다(0906: 화면끔 76mV/h, 화면켬 171mV/h).
- * 이제 0x28(Display Off)로 스캔을 멈춘다. 얼마나 줄었는지는 같은 방식으로
- * 재보면 그 자리에서 나온다.
+ * It used to only set the brightness to zero (which is all the BSP's
+ * backlight_off does). The pixels go dark but the driver, the gate scan and
+ * the boost converter all keep running — measured, "off" still drew 44% of
+ * "on" (76 mV/h against 171 mV/h).
+ * Now 0x28 (Display Off) stops the scan. How much that saved shows up
+ * immediately if measured the same way.
  *
- * 밝기 복원은 그대로 우리가 한다 — BSP 의 backlight_on 은 무조건 100% 라
- * 껐다 켤 때마다 사용자 설정이 날아갔다. */
-/* ── 터치 칩 재우기 ───────────────────────────────────────────
- * CST9217 은 화면이 꺼져 있어도 계속 스캔한다. 전원은 LCD 와 VCC3V3 를
- * 공유해서 끊을 수 없지만, 명령으로는 재울 수 있다.
+ * Restoring the brightness is still done here: the BSP's backlight_on always
+ * goes to 100%, which threw away the user's setting on every wake. */
+/* ── putting the touch chip to sleep ──────────────────────────
+ * The CST9217 keeps scanning even with the display off. Its power rail is
+ * shared with the LCD and VCC3V3 and cannot be cut, but it can be told to
+ * sleep.
  *
- * 근거(전부 로컬 자료): SensorLib 의 CST9xxConstants.h 가
- * CST9217_CHIP_ID=0x9217 과 나란히 CST92XX_REG_SLEEP_MODE=0xD105 를 정의하고,
- * TouchDrvCST92xx/CST226 의 sleep() 이 {0xD1,0x05} 2바이트를 보낸다.
- * Hynitron 이식 매뉴얼 p.20 에도 "0xD105 Deep sleep" 으로 나온다.
- * 우리 드라이버가 쓰는 레지스터(0xD000/0xD101/0xD1FC/0xD1F8)가 같은 계열
- * 표와 1:1 로 맞는다 — CST816 자용 계열의 0xA5 명령과는 다르다.
+ * Sources (all local): SensorLib's CST9xxConstants.h defines
+ * CST9217_CHIP_ID=0x9217 alongside CST92XX_REG_SLEEP_MODE=0xD105, and
+ * sleep() in TouchDrvCST92xx/CST226 sends the two bytes {0xD1,0x05}.
+ * Hynitron's porting manual lists "0xD105 Deep sleep" on p.20.
+ * The registers our driver already uses (0xD000/0xD101/0xD1FC/0xD1F8) map
+ * one-to-one onto the same family table — this is a different family from the
+ * CST816-style 0xA5 command.
  *
- * 깨우기는 RST(GPIO2) 를 토글한다. 슬립 중엔 I2C 가 안 먹을 수 있어서
- * 명령으로 깨우지 않는 게 정석이다. RST 가 LCD(GPIO1) 와 독립이라
- * 화면과 무관하게 터치만 되살릴 수 있다. */
+ * Waking is done by toggling RST (GPIO2). I2C may not respond while asleep,
+ * so waking by command is not the way. RST is independent of the LCD's
+ * (GPIO1), so touch can be revived without touching the display. */
 #define TP_ADDR      0x5A
 #define TP_RST_GPIO  2
 
@@ -1113,44 +1146,45 @@ static void tp_sleep(bool on)
         uint8_t cmd[2] = { 0xD1, 0x05 };           /* Deep sleep */
         if (i2c_master_transmit(s_tp, cmd, 2, 100) == ESP_OK) {
             s_tp_asleep = true;
-            ESP_LOGI("tp", "터치 칩 재움 (0xD1 0x05)");
+            ESP_LOGI("tp", "touch chip asleep (0xD1 0x05)");
         }
     } else {
         gpio_set_direction(TP_RST_GPIO, GPIO_MODE_OUTPUT);
         gpio_set_level(TP_RST_GPIO, 0);
         vTaskDelay(pdMS_TO_TICKS(10));
         gpio_set_level(TP_RST_GPIO, 1);
-        vTaskDelay(pdMS_TO_TICKS(50));             /* 데이터시트 권장 여유 */
+        vTaskDelay(pdMS_TO_TICKS(50));             /* the datasheet's recommended settling time */
         s_tp_asleep = false;
-        ESP_LOGI("tp", "터치 칩 깨움 (RST 토글)");
+        ESP_LOGI("tp", "touch chip awake (RST toggled)");
     }
 }
 
 void port_display_power(bool on)
 {
     badge_display_on(on);
-    /* 터치로 화면을 깨우지 않는 구조라(주머니 오작동 방지) 꺼진 동안
-     * 터치 칩이 스캔할 이유가 없다. */
+    /* Touch does not wake the display by design (pocket protection), so there
+     * is no reason for the touch chip to scan while it is off. */
     tp_sleep(!on);
 }
 
-/* ── PWR 버튼 ─────────────────────────────────────────────────
- * BOOT 와 달리 GPIO 가 아니다. AXP2101 이 눌림을 잡아서 인터럽트 상태
- * 레지스터에 표시해두면 우리가 I2C 로 읽어간다. 그래서 아주 살짝 늦다.
- * 길게 누르면 칩이 하드웨어로 전원을 끊어버린다 — 우리가 막을 수 없다. */
+/* ── the PWR button ───────────────────────────────────────────
+ * Unlike BOOT this is not a GPIO. The AXP2101 catches the press and flags it
+ * in an interrupt status register, which we read over I2C — so it is very
+ * slightly late. Held down, the chip cuts power in hardware and there is
+ * nothing we can do about it. */
 #include "driver/i2c_master.h"
 
 #define AXP_ADDR        0x34
 #define AXP_REG_INTEN2  0x41
 #define AXP_REG_INTSTS2 0x49
-#define AXP_PKEY_LONG   0x04     /* 통합 IRQ 비트 10 */
-#define AXP_PKEY_SHORT  0x08     /* 통합 IRQ 비트 11 */
+#define AXP_PKEY_LONG   0x04     /* combined IRQ bit 10 */
+#define AXP_PKEY_SHORT  0x08     /* combined IRQ bit 11 */
 
 static i2c_master_dev_handle_t s_axp;
 
 static bool axp_rd(uint8_t reg, uint8_t *v)
 {
-    if (!s_axp) axp_init();          /* 버튼 태스크보다 먼저 부를 수도 있다 */
+    if (!s_axp) axp_init();          /* this can be called before the button task */
     return s_axp && i2c_master_transmit_receive(s_axp, &reg, 1, v, 1, 100) == ESP_OK;
 }
 
@@ -1172,77 +1206,80 @@ static void axp_init(void)
     };
     if (i2c_master_bus_add_device(bus, &cfg, &s_axp) != ESP_OK) {
         s_axp = NULL;
-        ESP_LOGW("axp", "PMU 를 못 잡았다 — PWR 버튼은 꺼진다");
+        ESP_LOGW("axp", "could not reach the PMU — the PWR button is off");
         return;
     }
-    /* ── 안 쓰는 전원 레일 정리 ─────────────────────────────
-     * 회로도로 확인한 결과 이 보드가 실제로 쓰는 건 둘뿐이다:
-     *   DCDC1 → VCC3V3 (ESP32-S3 · LCD/터치 FPC · 코덱 디지털 · IMU · 앰프)
-     *   ALDO1 → A3V3   (ES8311/ES7210 아날로그 · 마이크 바이어스)
-     * 나머지 12개는 아무 데도 안 붙어 있다. DCDC2~5 는 인덕터조차 없다.
+    /* ── switching off unused power rails ───────────────────
+     * Checking the schematic, this board actually uses two:
+     *   DCDC1 -> VCC3V3 (ESP32-S3, LCD/touch FPC, codec digital, IMU, amp)
+     *   ALDO1 -> A3V3   (ES8311/ES7210 analogue, mic bias)
+     * The other twelve go nowhere. DCDC2-5 do not even have inductors.
      *
-     * 그런데 우리는 이 레지스터를 한 번도 안 건드렸다 — AXP 가 부팅
-     * 기본값(EFUSE) 그대로 돈다. 데이터시트 기본값엔 DCDC2·3·4 와 ALDO3 가
-     * 켜진 채로 올라오는 배치가 있고, 인덕터 없는 벅이 켜져 있으면 FB 가
-     * 안 올라와 최대듀티나 hiccup 으로 계속 스위칭한다.
+     * And these registers had never been touched — the AXP was running on its
+     * boot defaults (EFUSE). Some datasheet default layouts bring DCDC2, 3, 4
+     * and ALDO3 up enabled, and an enabled buck with no inductor never sees
+     * its feedback rise, so it switches at maximum duty or hiccups forever.
      *
-     * 먼저 현재 상태를 찍고, 웨이브셰어 자기네 예제가 하는 그대로 정리한다. */
+     * Log the current state first, then clean up the way Waveshare's own
+     * example does. */
     uint8_t d0 = 0, l0 = 0, l1 = 0, v1 = 0, va = 0;
     axp_rd(0x80, &d0); axp_rd(0x90, &l0); axp_rd(0x91, &l1);
     axp_rd(0x82, &v1); axp_rd(0x92, &va);
-    ESP_LOGI("axp", "정리 전  DCDC=0x%02X LDO=0x%02X/0x%02X  DCDC1=%dmV ALDO1=%dmV",
+    ESP_LOGI("axp", "before  DCDC=0x%02X LDO=0x%02X/0x%02X  DCDC1=%dmV ALDO1=%dmV",
              d0, l0, l1, 500 + v1 * 10, 500 + va * 100);
 
-    axp_wr(0x80, (uint8_t)((d0 & ~0x1E) | 0x01));   /* DCDC1 만 남긴다 */
-    axp_wr(0x90, 0x01);                              /* ALDO1 만 남긴다 */
-    axp_wr(0x91, (uint8_t)(l1 & ~0x01));             /* DLDO2 끔 */
+    axp_wr(0x80, (uint8_t)((d0 & ~0x1E) | 0x01));   /* leave only DCDC1 */
+    axp_wr(0x90, 0x01);                              /* leave only ALDO1 */
+    axp_wr(0x91, (uint8_t)(l1 & ~0x01));             /* DLDO2 off */
 
     axp_rd(0x80, &d0); axp_rd(0x90, &l0); axp_rd(0x91, &l1);
-    ESP_LOGI("axp", "정리 후  DCDC=0x%02X LDO=0x%02X/0x%02X", d0, l0, l1);
+    ESP_LOGI("axp", "after   DCDC=0x%02X LDO=0x%02X/0x%02X", d0, l0, l1);
 
-    /* ── 충전 설정 확인 ─────────────────────────────────────
-     * 우리는 충전을 전혀 제어하지 않고 칩 기본값에 맡긴다. 그 기본값이
-     * 이 배터리에 맞는지 알아야 해서 부팅 때 한 번 찍는다. */
+    /* ── checking the charging configuration ────────────────
+     * We do not control charging at all and leave it to the chip's defaults.
+     * Whether those defaults suit this battery is worth knowing, so they are
+     * logged once at boot. */
     {
         uint8_t ipre = 0, icc = 0, iterm = 0, cv = 0, voff = 0, vsys = 0, chg = 0;
         axp_rd(0x61, &ipre); axp_rd(0x62, &icc); axp_rd(0x63, &iterm);
         axp_rd(0x64, &cv);   axp_rd(0x24, &voff); axp_rd(0x14, &vsys);
         axp_rd(0x01, &chg);
-        /* 충전 전류: 0~8 은 25mA 단위, 9 부터 300/400/500... */
+        /* Charge current: 0-8 are 25 mA steps, 9 onward is 300/400/500... */
         int cc = (icc & 0x1F);
         int cc_ma = (cc <= 8) ? cc * 25 : 300 + (cc - 9) * 100;
         static const char *CV[] = { "-", "4.00V", "4.10V", "4.20V", "4.35V", "4.40V", "?", "?" };
-        static const char *ST[] = { "대기", "예비충전", "정전류", "정전압", "완료", "멈춤", "?", "?" };
-        ESP_LOGI("axp", "충전  전류 %dmA · 종료 %dmA · 만충 %s · 예비 %dmA",
+        static const char *ST[] = { "idle", "pre-charge", "CC", "CV", "done", "stopped", "?", "?" };
+        ESP_LOGI("axp", "charge  current %dmA, termination %dmA, full %s, pre-charge %dmA",
                  cc_ma, (iterm & 0x0F) * 25, CV[cv & 0x07], (ipre & 0x0F) * 25);
-        ESP_LOGI("axp", "보호  차단전압 %.1fV · 시스템최저 %.2fV · 지금 %s",
+        ESP_LOGI("axp", "protect cutoff %.1fV, system min %.2fV, now %s",
                  2.6 + (voff & 0x07) * 0.1, 4.1 + (vsys & 0x07) * 0.1,
                  ST[(chg >> 5) & 0x07]);
     }
 
-    /* ── 충전 안전 교정 ─────────────────────────────────────
-     * 읽어보니 기본값이 이랬다:
-     *   종료 전류 125mA — 충전 전류(200mA)의 62%. 이러면 60%쯤에서 "다 찼다"고
-     *     끊는다. 보통 충전 전류의 5~10% 로 잡아야 실제로 만충된다 → 25mA
-     *   예비 충전 125mA — 바닥난 리튬 셀을 깨울 땐 살살 해야 한다 → 25mA
-     *   차단 전압 2.6V  — 리튬은 3.0V 아래로 가면 회복 안 되는 손상이 시작된다.
-     *     여기가 제일 나빴다 → 3.0V
-     * 충전 전류(200mA)는 그대로 둔다. 배터리 용량을 모르는 상태에서 올리는 건
-     * 위험하고, 200mA 는 이 크기 셀에 무리한 값이 아니다. */
+    /* ── correcting the charging defaults ───────────────────
+     * What they actually were:
+     *   termination current 125 mA — 62% of the charge current (200 mA). That
+     *     calls it full at around 60%. It should be 5-10% of the charge
+     *     current to actually reach full -> 25 mA
+     *   pre-charge 125 mA — a flat lithium cell has to be woken gently -> 25 mA
+     *   cutoff 2.6 V — below 3.0 V lithium takes damage it does not come back
+     *     from. This was the worst of the three -> 3.0 V
+     * The charge current (200 mA) is left alone: raising it without knowing
+     * the cell's capacity is unwise, and 200 mA is not hard on a cell this size. */
     {
         uint8_t t = 0, ip = 0, vo = 0;
-        axp_rd(0x63, &t);  axp_wr(0x63, (uint8_t)((t & 0xF0) | 0x01));   /* 종료 25mA */
-        axp_rd(0x61, &ip); axp_wr(0x61, (uint8_t)((ip & 0xF0) | 0x01));  /* 예비 25mA */
-        axp_rd(0x24, &vo); axp_wr(0x24, (uint8_t)((vo & 0xF8) | 0x04));  /* 차단 3.0V */
+        axp_rd(0x63, &t);  axp_wr(0x63, (uint8_t)((t & 0xF0) | 0x01));   /* terminate at 25mA */
+        axp_rd(0x61, &ip); axp_wr(0x61, (uint8_t)((ip & 0xF0) | 0x01));  /* pre-charge 25mA */
+        axp_rd(0x24, &vo); axp_wr(0x24, (uint8_t)((vo & 0xF8) | 0x04));  /* cutoff 3.0V */
         axp_rd(0x63, &t);  axp_rd(0x61, &ip); axp_rd(0x24, &vo);
-        ESP_LOGI("axp", "교정 후  종료 %dmA · 예비 %dmA · 차단 %.1fV",
+        ESP_LOGI("axp", "corrected  termination %dmA, pre-charge %dmA, cutoff %.1fV",
                  (t & 0x0F) * 25, (ip & 0x0F) * 25, 2.6 + (vo & 0x07) * 0.1);
     }
 
     uint8_t v = 0;
     axp_rd(AXP_REG_INTEN2, &v);
     axp_wr(AXP_REG_INTEN2, v | AXP_PKEY_SHORT | AXP_PKEY_LONG);
-    axp_wr(AXP_REG_INTSTS2, AXP_PKEY_SHORT | AXP_PKEY_LONG);   /* 묵은 것 지우기 */
+    axp_wr(AXP_REG_INTSTS2, AXP_PKEY_SHORT | AXP_PKEY_LONG);   /* clear anything stale */
 }
 
 int port_pwr_key(void)
@@ -1253,9 +1290,9 @@ int port_pwr_key(void)
     if (!axp_rd(AXP_REG_INTSTS2, &st)) return 0;
     uint8_t hit = st & (AXP_PKEY_SHORT | AXP_PKEY_LONG);
     if (!hit) return 0;
-    axp_wr(AXP_REG_INTSTS2, st);             /* 읽은 비트를 통째로 지운다 */
+    axp_wr(AXP_REG_INTSTS2, st);             /* clear exactly the bits that were read */
 
-    /* 한 번 누른 게 두 번으로 세어지면 켜자마자 꺼진다. 0.4초 안엔 한 번만. */
+    /* One press counted twice switches it off the instant it comes on. One per 0.4 s. */
     int64_t now = esp_timer_get_time();
     if (now - last_us < 400000) return 0;
     last_us = now;
@@ -1264,11 +1301,11 @@ int port_pwr_key(void)
 }
 
 /* ── PCF85063 RTC ─────────────────────────────────────────────
- * ESP 내부 시계는 전원이 끊기면 사라진다. 보드에 달린 RTC 칩은 배터리로
- * 계속 돌기 때문에, 부팅할 때 여기서 읽어오고 시각을 맞출 때 여기에 쓴다.
- * 안 그러면 껐다 켤 때마다 1970년이다. */
+ * The ESP's internal clock is lost with power. The RTC chip on the board runs
+ * from its own cell, so it is read at boot and written whenever the clock is
+ * set. Without it, every power-on is 1970. */
 #define RTC_ADDR      0x51
-#define RTC_REG_SEC   0x04       /* 초·분·시·일·요일·월·년 7바이트 (BCD) */
+#define RTC_REG_SEC   0x04       /* sec, min, hour, day, weekday, month, year — 7 bytes BCD */
 
 static i2c_master_dev_handle_t s_rtc;
 
@@ -1293,10 +1330,10 @@ static void rtc_write_now(void)
     if (!rtc_open()) return;
     time_t now = time(NULL);
     struct tm tm;
-    gmtime_r(&now, &tm);                 /* 칩에는 UTC 로 넣는다 */
+    gmtime_r(&now, &tm);                 /* the chip is written in UTC */
     uint8_t b[8] = {
         RTC_REG_SEC,
-        dec2bcd(tm.tm_sec) & 0x7F,       /* bit7 = 발진 정지 표시. 0 으로 지운다 */
+        dec2bcd(tm.tm_sec) & 0x7F,       /* bit7 flags a stopped oscillator; clear it */
         dec2bcd(tm.tm_min),
         dec2bcd(tm.tm_hour),
         dec2bcd(tm.tm_mday),
@@ -1305,17 +1342,17 @@ static void rtc_write_now(void)
         dec2bcd(tm.tm_year % 100),
     };
     i2c_master_transmit(s_rtc, b, sizeof(b), 200);
-    ESP_LOGI("rtc", "RTC 에 기록했다");
+    ESP_LOGI("rtc", "written to the RTC");
 }
 
-/* 시간대는 UTC 기준 분 단위 오프셋으로 들고 있다가 POSIX 문자열로 만든다.
- * POSIX 는 부호가 반대다 — 서울(UTC+9)은 "<+09>-9". */
+/* The time zone is held as minutes offset from UTC and turned into a POSIX
+ * string. POSIX has the opposite sign — Seoul (UTC+9) is "<+09>-9". */
 static int s_tz_min = 9 * 60;
 
 void port_set_tz_offset(int minutes)
 {
     char tz[32];
-    int m = -minutes;                       /* 부호 뒤집기 */
+    int m = -minutes;                       /* flip the sign */
     int h = m / 60, r = abs(m % 60);
     snprintf(tz, sizeof(tz), "UTC%+d:%02d", h, r);
     setenv("TZ", tz, 1);
@@ -1342,8 +1379,8 @@ void port_rtc_restore(void)
     }
     port_set_tz_offset(tz);
 
-    /* 어느 주소에 뭐가 붙어 있는지 한 번 훑어본다 — 주소를 잘못 알고 있으면
-     * 아무 로그 없이 조용히 실패한다. */
+    /* Probe once for what is on which address — with a wrong address the
+     * failure is silent and leaves no log at all. */
     i2c_master_bus_handle_t bus = bsp_i2c_get_handle();
     if (bus) {
         char found[96] = {0};
@@ -1353,18 +1390,18 @@ void port_rtc_restore(void)
                 n += snprintf(found + n, sizeof(found) - n, "%02X ", a);
             }
         }
-        ESP_LOGI("i2c", "장치: %s", found);
+        ESP_LOGI("i2c", "devices: %s", found);
     }
 
-    if (!rtc_open()) { ESP_LOGW("rtc", "I2C 장치 등록 실패"); return; }
+    if (!rtc_open()) { ESP_LOGW("rtc", "could not register the I2C device"); return; }
     uint8_t reg = RTC_REG_SEC, d[7] = {0};
     if (i2c_master_transmit_receive(s_rtc, &reg, 1, d, sizeof(d), 200) != ESP_OK) {
-        ESP_LOGW("rtc", "RTC 가 응답하지 않는다 (주소 0x%02X)", RTC_ADDR);
+        ESP_LOGW("rtc", "no RTC responding (address 0x%02X)", RTC_ADDR);
         return;
     }
 
-    if (d[0] & 0x80) {                   /* 발진이 멈춘 적 있음 = 값 못 믿는다 */
-        ESP_LOGW("rtc", "RTC 가 비어 있다 — 시각 맞추기 필요");
+    if (d[0] & 0x80) {                   /* the oscillator has stopped — do not trust it */
+        ESP_LOGW("rtc", "the RTC is empty — the clock needs setting");
         return;
     }
     struct tm tm = {
@@ -1375,42 +1412,46 @@ void port_rtc_restore(void)
         .tm_mon  = bcd2dec(d[5] & 0x1F) - 1,
         .tm_year = bcd2dec(d[6]) + 100,
     };
-    if (tm.tm_year < 120) return;        /* 2020 년보다 이르면 쓰레기 */
+    if (tm.tm_year < 120) return;        /* anything before 2020 is garbage */
 
-    /* newlib 에 timegm 이 없다. TZ 를 잠깐 UTC 로 돌려 mktime 을 쓴다. */
+    /* newlib has no timegm. Switch TZ to UTC briefly and use mktime. */
     setenv("TZ", "UTC0", 1); tzset();
     time_t t = mktime(&tm);
     setenv("TZ", "KST-9", 1); tzset();
     struct timeval tv = { .tv_sec = t };
     settimeofday(&tv, NULL);
-    ESP_LOGI("rtc", "RTC 에서 시각 복원: %04d-%02d-%02d %02d:%02d UTC",
+    ESP_LOGI("rtc", "clock restored from the RTC: %04d-%02d-%02d %02d:%02d UTC",
              tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min);
 }
 
-/* ── 기울기 ───────────────────────────────────────────────────
- * QMI8658 로 중력 방향을 읽는다. 화면 평면(X·Y)에 실린 중력 성분의 각도가
- * 곧 "배지가 얼마나 돌아가 있나"다. 눕혀 놓으면 그 성분이 사라져서
- * 각도가 잡음이 된다 — 그럴 땐 못 믿는다고 알려준다. */
+/* ── tilt ─────────────────────────────────────────────────────
+ * Gravity's direction, read from the QMI8658. The angle of the component
+ * lying in the screen plane (X and Y) is "how far the badge is rotated". Flat
+ * on a table that component vanishes and the angle becomes noise — which is
+ * reported rather than returned. */
 #include "qmi8658.h"
 
 static qmi8658_dev_t s_imu;
 static bool          s_imu_ok;
 static bool          s_imu_tried;
-/* 🚨 가속도계를 한 번 켜면 125Hz 로 계속 돈다. 구슬게임을 한 판 하거나
- * 자동회전을 잠깐 켜면 그 뒤로 영원히 켜져 있었다 — 화면을 꺼도 그렇다.
- * 마지막으로 읽은 지 5초가 지나면 재운다. 다음에 읽을 때 알아서 깬다.
- * 깨우는 데 몇 ms 밖에 안 걸려서 게임 조작감엔 영향이 없다. */
+/* 🚨 Once the accelerometer is switched on it runs at 125 Hz forever. One
+ * round of the marble game or a moment of auto-rotate left it on for good,
+ * display off included.
+ * Five seconds since the last read puts it to sleep; the next read wakes it.
+ * Waking takes a few milliseconds, so games do not notice. */
 static bool     s_imu_awake;
 static int64_t  s_imu_last_us;
-/* 🚨 켠 직후 몇 ms 는 유효한 값이 안 나온다(125Hz 라 한 표본이 8ms).
- * 그 사이 값을 읽으면 직전 것이거나 0 인데, 게임과 물과 에어마우스가
- * 하나같이 "지금 이 자세가 수평" 을 그 첫 값으로 잡는다. 그러면 기준이
- * 엉뚱한 데 박혀 판이 끝에 붙고 안 움직인다 — 브릭 첫판이 안 먹고 한 번
- * 죽어야 되던 것의 정체다(0909 지적). 깬 직후엔 "아직 모른다" 고 답한다. */
+/* 🚨 For the first few milliseconds after waking there is no valid reading
+ * (at 125 Hz a sample is 8 ms). Read in that window and you get the previous
+ * value or zero — and the games, the water and the air mouse all take that
+ * first value as "this attitude is level". The reference lands somewhere
+ * wrong and the paddle sits at one end and will not move, which is why the
+ * first round of bricks never worked until you had died once. Right after
+ * waking, this answers "not yet known". */
 static int64_t  s_imu_wake_us;
 #define IMU_SETTLE_US  30000
 
-static void imu_touch(void)      /* 방금 썼다고 표시 */
+static void imu_touch(void)      /* mark it as just used */
 {
     s_imu_last_us = esp_timer_get_time();
     if (s_imu_ok && !s_imu_awake) {
@@ -1420,39 +1461,40 @@ static void imu_touch(void)      /* 방금 썼다고 표시 */
     }
 }
 
-/* 깬 지 얼마 안 됐으면 아직 못 믿는다 */
+/* Too soon after waking to be trusted */
 static bool imu_settled(void)
 {
     return s_imu_wake_us == 0 ||
            esp_timer_get_time() - s_imu_wake_us >= IMU_SETTLE_US;
 }
 
-void port_imu_idle_check(void)   /* 런처가 주기적으로 부른다 */
+void port_imu_idle_check(void)   /* the launcher calls this periodically */
 {
     if (!s_imu_ok || !s_imu_awake) return;
     if (esp_timer_get_time() - s_imu_last_us < 5000000LL) return;
     qmi8658_enable_accel(&s_imu, false);
     s_imu_awake = false;
-    ESP_LOGI("imu", "안 쓴 지 5초 — 가속도계 재움");
+    ESP_LOGI("imu", "unused for 5 s — accelerometer asleep");
 }
 
 static float s_ax, s_ay, s_az;
 
-/* 화면 법선(Z)보다 평면 성분이 확실히 커야 "세워 들었다"고 본다.
- * 책상에 눕히면 Z 가 크게 나오고, 그때 각도는 의미가 없다. */
+/* "Held upright" means the in-plane component is clearly larger than the
+ * screen normal (Z). Flat on a desk Z dominates and the angle is meaningless. */
 bool port_imu_upright(void)
 {
     float plane = sqrtf(s_ax * s_ax + s_ay * s_ay);
     return plane > 700.0f && plane > fabsf(s_az);
 }
 
-/* 세 축을 그대로 준다. 단위는 mg (1g ≈ 1000).
- * 🚨 x,y 만 쓰면 '기울였나' 밖에 모른다. 흔들면 세기가 변하는데 그건
- * 세 축의 크기에 들어 있다 — 물처럼 흔들림에 반응해야 하는 것엔 이게 필요하다. */
+/* All three axes as they come, in mg (1 g is about 1000).
+ * 🚨 With only x and y you know whether it is tilted and nothing else. A
+ * shake changes the magnitude, and that lives in all three — anything that
+ * has to respond to shaking, like the water, needs this. */
 bool port_imu_accel3(float *x, float *y, float *z)
 {
     float d;
-    port_imu_angle(&d);              /* 값을 새로 읽어 두게 한다 */
+    port_imu_angle(&d);              /* forces a fresh read */
     if (x) *x = s_ax;
     if (y) *y = s_ay;
     if (z) *z = s_az;
@@ -1467,8 +1509,9 @@ bool port_imu_accel(float *x, float *y)
     return s_imu_ok && imu_settled();
 }
 
-/* 🚨 초기화를 여기로 뺐다. 예전엔 port_imu_angle 안에 있어서 자이로만 쓰는
- * 쪽(에어마우스)은 칩을 깨울 길이 없었다. */
+/* 🚨 Initialisation was pulled out to here. It used to live inside
+ * port_imu_angle, which left anything using only the gyro (the air mouse)
+ * with no way to bring the chip up. */
 static bool imu_ready(void)
 {
     if (!s_imu_tried) {
@@ -1480,26 +1523,29 @@ static bool imu_ready(void)
             qmi8658_enable_accel(&s_imu, true);
             s_imu_awake = true;
             s_imu_ok = true;
-            /* 🚨 켠 직후는 재웠다 깬 것과 똑같이 못 믿는다. 여기서 안 잡아
-             * 두면 부팅 뒤 첫 읽기가 x=y=z=4000(있을 수 없는 값)인데도
-             * "믿을 만함" 으로 나간다(0909 벤치에서 잡음). */
+            /* 🚨 Just after power-on is as untrustworthy as just after
+             * waking. Without catching it here, the first read after boot is
+             * x=y=z=4000 — an impossible value — and still reports as
+             * trustworthy (caught by the bench). */
             s_imu_wake_us = esp_timer_get_time();
-            ESP_LOGI("imu", "QMI8658 붙었다");
+            ESP_LOGI("imu", "QMI8658 found");
         } else {
-            ESP_LOGW("imu", "QMI8658 초기화 실패 — 기울기 보정 꺼짐");
+            ESP_LOGW("imu", "QMI8658 init failed — tilt compensation is off");
         }
     }
     return s_imu_ok;
 }
 
-/* ── 자이로 ────────────────────────────────────────────────────
- * 🔋 켜면 계속 돈다. 켠 쪽이 끄기 전엔 안 꺼진다 — 가속도계처럼 "안 쓰면
- * 재우기" 를 안 붙인 이유는, 에어마우스는 몇 초씩 가만히 겨누고 있는 것이
- * 정상이라 그걸 무동작으로 보면 안 되기 때문이다. */
+/* ── gyro ─────────────────────────────────────────────────────
+ * 🔋 Once on it stays on until whoever switched it on switches it off. It has
+ * no "sleep when unused" like the accelerometer because holding the air mouse
+ * still and aiming for several seconds is normal, and treating that as idle
+ * would be wrong. */
 static bool    s_gyro_on;
 static int64_t s_gyro_wake_us;
-/* 🚨 40ms 로는 모자랐다. 자이로는 켜고 나서 설익은 값을 한동안 뱉는데,
- * 그걸 영점으로 잡으면 커서가 그만큼 영영 흐른다(0910 실기). */
+/* 🚨 40 ms was not enough. A gyro emits unsettled values for a while after
+ * being switched on, and taking those as the zero leaves the cursor drifting
+ * by that much forever. */
 #define GYRO_SETTLE_US 120000
 
 void port_imu_gyro_enable(bool on)
@@ -1507,13 +1553,15 @@ void port_imu_gyro_enable(bool on)
     if (!imu_ready()) return;
     if (on == s_gyro_on) return;
     if (on) {
-        /* 512dps 면 손목을 세게 털어도 안 잘린다(사람 손목이 대략 500dps).
-         * ODR 은 보내는 주기(초당 66회)보다 넉넉하면 된다. */
+        /* 512 dps takes a hard flick of the wrist without clipping (a human
+         * wrist is roughly 500). The ODR only has to be comfortably above the
+         * report rate (66 per second). */
         qmi8658_set_gyro_range(&s_imu, QMI8658_GYRO_RANGE_512DPS);
         qmi8658_set_gyro_odr(&s_imu, QMI8658_GYRO_ODR_250HZ);
-        /* 🚨 단위를 여기서 못 박는다. 초기화가 dps 로 잡아 주긴 하지만,
-         * 이 값 하나가 라디안으로 뒤집히면 커서가 57배 굼떠지고 원인을 찾기
-         * 어렵다 — 각도로 읽는다는 걸 코드에 남겨둔다. */
+        /* 🚨 The unit is pinned here. Initialisation does set degrees, but if
+         * this one value ever flipped to radians the cursor would be 57 times
+         * slower and the cause would be hard to find — so the code says out
+         * loud that it reads degrees. */
         s_imu.gyro_unit_rads = false;
         qmi8658_enable_gyro(&s_imu, true);
         s_gyro_wake_us = esp_timer_get_time();
@@ -1521,19 +1569,21 @@ void port_imu_gyro_enable(bool on)
         qmi8658_enable_gyro(&s_imu, false);
     }
     s_gyro_on = on;
-    ESP_LOGI("imu", "자이로 %s", on ? "켬" : "끔");
+    ESP_LOGI("imu", "gyro %s", on ? "on" : "off");
 }
 
 bool port_imu_gyro(float *x, float *y, float *z)
 {
-    /* 🚨 켠 직후는 못 믿는다 — 가속도계에서 첫 값이 있을 수 없는 수로 나와
-     * 기준이 엉뚱하게 박히던 것과 같은 함정이다. */
+    /* 🚨 Not trustworthy right after switch-on — the same trap as the
+     * accelerometer returning an impossible first value and anchoring a
+     * reference to it. */
     if (!s_gyro_on) return false;
     if (esp_timer_get_time() - s_gyro_wake_us < GYRO_SETTLE_US) return false;
 
-    /* 🚨 헤더에 qmi8658_read_gyro_dps() 가 선언돼 있는데 **구현이 없다**
-     * (벤더 드라이버가 선언만 해뒀다 — 링크에서야 안다). 실제로 있는 건
-     * qmi8658_read_gyro() 뿐이고, 그게 gyro_unit_rads 를 보고 단위를 고른다. */
+    /* 🚨 The header declares qmi8658_read_gyro_dps() but **there is no
+     * implementation** (the vendor driver declared it and stopped — you find
+     * out at link time). What exists is qmi8658_read_gyro(), which picks its
+     * unit from gyro_unit_rads. */
     float gx = 0, gy = 0, gz = 0;
     if (qmi8658_read_gyro(&s_imu, &gx, &gy, &gz) != ESP_OK) return false;
     if (x) *x = gx;
@@ -1550,8 +1600,9 @@ bool port_imu_angle(float *deg)
     float x = 0, y = 0, z = 0;
     if (qmi8658_read_accel(&s_imu, &x, &y, &z) != ESP_OK) return false;
 
-    /* 드라이버가 g 가 아니라 mg 로 준다 (1g ≈ 1000). 실기 로그로 확인했다.
-     * 화면 평면에 실린 성분이 0.35g 미만이면 눕혀 둔 것 — 각도가 잡음이다. */
+    /* The driver reports mg, not g (1 g is about 1000) — confirmed against
+     * board logs. Below 0.35 g in the screen plane it is lying flat and the
+     * angle is noise. */
     s_ax = x; s_ay = y; s_az = z;
 
     float mag = sqrtf(x * x + y * y);
@@ -1563,28 +1614,29 @@ bool port_imu_angle(float *deg)
     int64_t now = esp_timer_get_time();
     if (now - last > 2000000) {
         last = now;
-        ESP_LOGI("imu", "accel x=%.2f y=%.2f z=%.2f → %.0f도", x, y, z, *deg);
+        ESP_LOGI("imu", "accel x=%.2f y=%.2f z=%.2f -> %.0f deg", x, y, z, *deg);
     }
     return true;
 }
 
-/* ── 배터리 ───────────────────────────────────────────────────
- * AXP2101 이 잔량을 계산해서 레지스터 하나에 넣어준다. 우리가 전압으로
- * 어림잡을 필요가 없다. 상태2(0x01) 비트 3 이 배터리 있음, 비트 5~6 이 충전중. */
-#define AXP_REG_STATUS1   0x00      /* 비트3 = 배터리 있음 (벤더 코드 확인) */
-#define AXP_REG_STATUS2   0x01      /* 비트[6:5] = 00 대기 / 01 충전 / 10 방전 */
+/* ── battery ──────────────────────────────────────────────────
+ * The AXP2101 works out the charge level and puts it in a register, so there
+ * is no need to guess from voltage. In status 2 (0x01), bit 3 is
+ * battery-present and bits 5-6 are charging. */
+#define AXP_REG_STATUS1   0x00      /* bit3 = battery present (per the vendor code) */
+#define AXP_REG_STATUS2   0x01      /* bits [6:5] = 00 idle / 01 charging / 10 discharging */
 #define AXP_REG_BAT_PCT   0xA4
 
-/* AXP2101 공통설정(0x10) 비트0 = 소프트 종료.
- * 전에는 "power off" 글자만 띄우고 실제로는 계속 켜져 있었다 — 그게 더 나쁘다.
- * 이제 진짜로 끊는다. 다시 켜려면 PWR 을 다시 눌러야 한다. */
+/* Common config (0x10) bit 0 is soft power-off.
+ * It used to show the words "power off" and stay on, which is worse than
+ * doing nothing. It really cuts power now; PWR has to be pressed to return. */
 #define AXP_REG_COMMON  0x10
 
 void port_power_off(void)
 {
     uint8_t v = 0;
     if (!axp_rd(AXP_REG_COMMON, &v)) return;
-    ESP_LOGI("axp", "전원 차단");
+    ESP_LOGI("axp", "power off");
     axp_wr(AXP_REG_COMMON, v | 0x01);
 }
 
@@ -1592,50 +1644,54 @@ int port_battery_percent(void)
 {
     uint8_t st1 = 0, pct = 0;
     if (!axp_rd(AXP_REG_STATUS1, &st1)) {
-        ESP_LOGW("batt", "PMU 를 못 읽는다");
+        ESP_LOGW("batt", "cannot read the PMU");
         return -1;
     }
     if (!(st1 & 0x08)) {
-        ESP_LOGD("batt", "배터리 없음 (STATUS1=0x%02X)", st1);
+        ESP_LOGD("batt", "no battery (STATUS1=0x%02X)", st1);
         return -1;
     }
     if (!axp_rd(AXP_REG_BAT_PCT, &pct)) return -1;
 
     static bool logged;
-    if (!logged) { logged = true; ESP_LOGI("batt", "STATUS1=0x%02X 잔량=%d%%", st1, pct); }
+    if (!logged) { logged = true; ESP_LOGI("batt", "STATUS1=0x%02X level=%d%%", st1, pct); }
     int p = pct > 100 ? 100 : pct;
     batt_track(p, (st1 & 0x20) != 0);
     return p;
 }
 
-/* ── 남은 시간 ────────────────────────────────────────────────
- * 용량(mAh)도 전류계도 없다. 그래서 "1%가 떨어지는 데 걸린 시간"을 직접 재서
- * 남은 %에 곱한다 — 지어낸 숫자가 아니라 이 기기에서 실제로 관측한 값이다.
- * 화면을 켜두면 빨리, 꺼두면 천천히 닳으므로 값은 계속 움직인다.
- * 그래서 표시도 "지금 속도로"라고 못박는다. */
+/* ── time remaining ───────────────────────────────────────────
+ * There is no capacity figure and no current sensor. So "how long one percent
+ * takes to fall" is measured directly and multiplied by what is left — not an
+ * invented number but one observed on this device.
+ * It drains fast with the display on and slowly with it off, so the value
+ * keeps moving, and the display says "at the current rate" for that reason. */
 static int      s_last_pct = -1;
 static int64_t  s_last_drop_us;
-static float    s_min_per_pct;      /* 1% 당 분. 0 이면 아직 모름 */
+static float    s_min_per_pct;      /* minutes per percent; 0 means not known yet */
 
-/* 🚨 재는 방식은 맞다 — 전류계가 없으니 "1%가 떨어지는 데 몇 분" 을 직접
- * 잰다. 틀린 건 그 값을 하나만 들고 있다는 것이다. 방전 곡선은 직선이
- * 아니라서 잔량에 따라 속도가 다르다. 이 배지가 스스로 남긴 일지가 그렇게
- * 말한다(0909, 186줄):
- *     위쪽 100→63% : 33,544초에 37% = 15.1분/%
- *     아래쪽 62→ 3% : 18,180초에 59% =  5.1분/%   ← 세 배 차이
- * 게다가 EMA(0.7:0.3)가 충전 경계를 넘어 이어지니, 지난 방전의 바닥값이
- * 이번 방전의 꼭대기까지 따라온다. 실제로 최근 실측은 16.4분/% 인데 학습값은
- * 11.0분/% 였고, 설정 화면은 86%에서 "15h 46m" 을 띄웠다 — 일지가 말하는
- * 23시간보다 30% 넘게 짧다.
- * 그래서 구간을 나눠 따로 배우고, 남은 시간은 구간을 이어 더한다. */
+/* 🚨 The method is right — with no current sensor, timing how long a percent
+ * takes is the thing to do. What was wrong was holding a single value.
+ * Discharge curves are not straight, so the rate depends on the level. The
+ * badge's own journal says so (186 lines):
+ *     upper 100 -> 63%: 37% in 33,544 s = 15.1 min/%
+ *     lower  62 ->  3%: 59% in 18,180 s =  5.1 min/%   <- three times faster
+ * And with an EMA (0.7:0.3) running across charge boundaries, the bottom of
+ * the last discharge follows into the top of the next. Recent measurement was
+ * 16.4 min/% while the learned value was 11.0, and Settings showed "15h 46m"
+ * at 86% — more than 30% short of the 23 hours the journal implies.
+ * So the range is split into bands, learned separately, and the remaining
+ * time is summed across them. */
 #define BAND_N 3
-static const uint8_t BAND_LO[BAND_N] = { 60, 30, 0 };   /* 각 구간의 아래 끝 */
-static float s_mpp[BAND_N];                              /* 구간별 1%당 분 */
-/* 🚨 그 칸을 실제로 배웠나. 옛 단일 값을 세 칸에 복사한 '씨앗' 과 진짜로
- * 잰 값을 갈라야 한다 — 0911 에 30~59% 와 0~29% 가 나란히 11.0분/% 으로
- * 찍혀 있었는데 둘 다 안 재본 씨앗이었다. 같은 일지에 끝까지 방전한 기록이
- * 있어 손으로 재보니 7.9분/% 였다. **안 재본 값이 잰 값처럼 보이면 안 된다.**
- * 별도 키에 둔다 — mppb 형식을 건드리면 이미 배운 60~100% 가 날아간다. */
+static const uint8_t BAND_LO[BAND_N] = { 60, 30, 0 };   /* lower edge of each band */
+static float s_mpp[BAND_N];                              /* minutes per percent, per band */
+/* 🚨 Whether a band was actually learned. A "seed" copied from the old single
+ * value into all three has to be distinguishable from a real measurement —
+ * 30-59% and 0-29% both read 11.0 min/% and both were unmeasured seeds. The
+ * same journal had a full discharge in it, and measured by hand that was
+ * 7.9 min/%. **A value that was never measured must not look like one that
+ * was.** Kept under a separate key: changing the mppb format would throw away
+ * the 60-100% band that has been learned. */
 static uint16_t s_mpp_seen[BAND_N];
 static bool  s_mpp_loaded;
 
@@ -1651,11 +1707,12 @@ static void mpp_load(void)
     s_mpp_loaded = true;
     nvs_handle_t nh;
     if (nvs_open("badge", NVS_READONLY, &nh) != ESP_OK) return;
-    /* 🚨 전체 하나짜리 값도 여기서 되살린다. 예전엔 NVS 에 **쓰기만 하고 읽는
-     * 데가 없었다** — 그래서 켤 때마다 0 에서 시작했고, 부팅 뒤 첫 1% 가
-     * 떨어지는 순간 그동안 쌓은 평균을 통째로 갈아치웠다(`== 0` 가지).
-     * 하루에 열두 번 꽂았다 뽑는 물건이라 사실상 "방금 잰 값 하나" 였고,
-     * 그래서 0909 에 23.1시간, 0910 에 38.6시간처럼 크게 튀었다. */
+    /* 🚨 The single overall value is restored here too. It used to be
+     * **written to NVS and never read back**, so it started from zero on
+     * every boot and the first percent drop after boot replaced the whole
+     * accumulated average (the `== 0` branch). On a device plugged and
+     * unplugged a dozen times a day that made it "the last single
+     * measurement", which is why it swung between 23.1 and 38.6 hours. */
     uint32_t one = 0;
     if (nvs_get_u32(nh, "mpp", &one) == ESP_OK && one) s_min_per_pct = one / 100.0f;
     size_t nlen = sizeof(s_mpp_seen);
@@ -1663,9 +1720,9 @@ static void mpp_load(void)
         memset(s_mpp_seen, 0, sizeof(s_mpp_seen));
     size_t len = sizeof(s_mpp);
     if (nvs_get_blob(nh, "mppb", s_mpp, &len) != ESP_OK || len != sizeof(s_mpp)) {
-        /* 구간별 값이 아직 없다. 예전에 하나로 배운 값이 있으면 세 칸에 그대로
-         * 넣어 둔다 — 갈아 끼우자마자 "재는 중" 으로 돌아가면 안 되니까.
-         * 다음 방전부터 구간별로 갈린다. */
+        /* No per-band values yet. If there is an old single value, copy it
+         * into all three so that upgrading does not drop back to "measuring".
+         * They diverge from the next discharge onward. */
         uint32_t v = 0;
         if (nvs_get_u32(nh, "mpp", &v) == ESP_OK && v)
             for (int b = 0; b < BAND_N; b++) s_mpp[b] = v / 100.0f;
@@ -1673,7 +1730,7 @@ static void mpp_load(void)
     nvs_close(nh);
 }
 
-/* 그 구간을 아직 못 배웠으면 가장 가까운 아는 구간의 값을 빌려 쓴다. */
+/* If that band has not been learned, borrow the nearest one that has. */
 static float mpp_for(int band)
 {
     if (s_mpp[band] > 0) return s_mpp[band];
@@ -1686,49 +1743,52 @@ static float mpp_for(int band)
 
 static void batt_track(int pct, bool plugged)
 {
-    if (plugged) {                  /* 충전 중엔 측정을 접는다 */
+    if (plugged) {                  /* no measuring while charging */
         s_last_pct = -1;
         return;
     }
     int64_t now = esp_timer_get_time();
     if (s_last_pct < 0) { s_last_pct = pct; s_last_drop_us = now; return; }
 
-    /* 🚨 잔량이 도로 올랐다 = 아까 낮게 읽힌 건 진짜로 쓴 게 아니라 부하로
-     * 전압이 눌렸던 것이다(AXP2101 잔량계는 전압을 보고 계산한다. 쿨롱
-     * 카운터가 아니다). 0909 실기: 녹음 30분 뒤 83% → 녹음 끝나자 88%.
+    /* 🚨 The level went back up, which means the earlier low reading was not
+     * energy spent but voltage sagging under load (the AXP2101's gauge works
+     * from voltage; it is not a coulomb counter). On the board: 83% after
+     * thirty minutes of recording, back to 88% when recording stopped.
      *
-     * 예전엔 오르면 그냥 넘어갔는데, 그러면 기준점이 눌린 값에 머물러서
-     * 같은 구간을 두 번 센다:
-     *     90 → (눌림) 88 : 2% 썼다고 기록
-     *        → (회복) 90 : 무시  ← 여기서 기준을 안 올린 게 잘못
-     *        → (진짜) 88 : 또 2% 썼다고 기록
-     * 그래서 학습된 소모율이 실제보다 빠르게 나왔다. 오르면 기준을 새로 잡는다. */
+     * A rise used to be ignored, which left the reference at the sagged value
+     * and counted the same stretch twice:
+     *     90 -> (sag) 88 : recorded as 2% used
+     *        -> (recover) 90 : ignored  <- not raising the reference here was the bug
+     *        -> (real) 88 : recorded as another 2% used
+     * So the learned rate came out faster than reality. A rise now resets the
+     * reference. */
     if (pct > s_last_pct) {
-        ESP_LOGI("batt", "잔량이 %d%%→%d%% 로 회복 — 부하로 눌렸던 것이다. 기준 다시 잡음",
+            ESP_LOGI("batt", "level recovered %d%% -> %d%% — that was sag under load. Reference reset",
                  s_last_pct, pct);
         s_last_pct = pct;
         s_last_drop_us = now;
         return;
     }
-    if (pct == s_last_pct) return;  /* 아직 안 떨어졌다 */
+    if (pct == s_last_pct) return;  /* has not dropped yet */
 
     int drop = s_last_pct - pct;
     float mins = (float)(now - s_last_drop_us) / 60000000.0f / drop;
     s_last_pct = pct;
     s_last_drop_us = now;
-    if (mins < 0.2f || mins > 600.0f) return;      /* 말도 안 되는 값은 버린다 */
+    if (mins < 0.2f || mins > 600.0f) return;      /* discard the impossible */
 
-    /* 처음 한 번은 그대로, 그 뒤로는 천천히 섞는다.
-     * 🚨 섞기 전에 저장분을 먼저 되살려야 한다 — 안 그러면 부팅 첫 방울이
-     *    쌓아둔 값을 갈아치운다. mpp_load 는 두 번 불러도 공짜다. */
+    /* Take the first one as-is and blend gently after that.
+     * 🚨 Restore what was stored before blending, or the first drop after
+     *    boot replaces what had accumulated. mpp_load is free to call twice. */
     mpp_load();
     s_min_per_pct = (s_min_per_pct == 0) ? mins : s_min_per_pct * 0.7f + mins * 0.3f;
 
-    /* 떨어져 들어간 자리의 구간에 넣는다. 완만한 위쪽과 가파른 아래쪽이
-     * 서로를 오염시키지 않게. (위에서 이미 불러왔다) */
+    /* Put it in the band the level dropped into, so the gentle top and the
+     * steep bottom do not contaminate each other. (Already loaded above.) */
     int b = band_of(pct);
-    /* 🚨 씨앗 위에 처음 얹을 땐 섞지 말고 갈아치운다. 안 그러면 안 재본
-     * 값이 30% 씩만 밀려나 한참 동안 거짓말이 남는다. */
+    /* 🚨 The first real measurement over a seed replaces it rather than
+     * blending. Otherwise an unmeasured value only moves 30% at a time and
+     * keeps lying for a long while. */
     s_mpp[b] = (s_mpp[b] == 0 || s_mpp_seen[b] == 0) ? mins
                                                      : s_mpp[b] * 0.7f + mins * 0.3f;
     if (s_mpp_seen[b] < 65535) s_mpp_seen[b]++;
@@ -1749,8 +1809,9 @@ int port_battery_minutes_left(void)
     int pct = port_battery_percent();
     if (pct < 0) return -1;
 
-    /* 🚨 잔량에 값 하나를 곱하지 않는다. 1%씩 바닥까지 내려가면서 그 자리
-     * 구간의 값을 더한다 — 아래쪽이 가파른 만큼 실제로 짧게 계산된다. */
+    /* 🚨 Do not multiply the level by one number. Walk down percent by
+     * percent to zero, adding that band's value — which comes out genuinely
+     * shorter, because the bottom is steeper. */
     float total = 0;
     bool any = false;
     for (int p = pct; p > 0; p--) {
@@ -1770,8 +1831,8 @@ bool port_battery_charging(void)
     return ((st >> 5) & 0x03) == 0x01;
 }
 
-/* 100% 가 되면 충전이 끝나서 "충전 중"이 아니게 된다. 그래도 꽂혀는 있으니
- * 표시는 남아야 한다 — STATUS1 비트5 가 VBUS 있음이다. */
+/* At 100% charging finishes, so it is no longer "charging" — but it is still
+ * plugged in and the indicator should say so. STATUS1 bit 5 is VBUS present. */
 bool port_battery_plugged(void)
 {
     uint8_t st = 0;
@@ -1782,10 +1843,12 @@ bool port_battery_plugged(void)
 
 
 
-/* ── 배터리 실측 로거 ──────────────────────────────────────
- * AXP2101 은 전류계를 안 내주고 전압만 준다(0x34/0x35, 상위 5비트+하위 8비트 = mV).
- * 그래서 "몇 mA 먹나"를 칩에 물어볼 수가 없다. 대신 쓰면서 전압과 퍼센트를
- * 1분마다 남겨두면 실제 소모 곡선이 저절로 쌓인다. 추정을 실측으로 바꾸는 값싼 방법. */
+/* ── the battery logger ────────────────────────────────────
+ * The AXP2101 exposes no current sensor, only voltage (0x34/0x35, top five
+ * bits plus low eight = mV). So there is no way to ask the chip how many
+ * milliamps something costs. Instead, writing down the voltage and percentage
+ * once a minute while using it builds the real discharge curve by itself — a
+ * cheap way to turn an estimate into a measurement. */
 #define AXP_REG_ADC_H 0x34
 #define AXP_REG_ADC_L 0x35
 
@@ -1797,32 +1860,33 @@ int port_battery_mv(void)
     return mv > 0 ? mv : -1;
 }
 
-/* ── 배터리 일지 ──────────────────────────────────────────────
- * 케이블을 뽑으면 시리얼로 나가는 로그를 받아 적을 데가 없다. 그래서
- * 배지가 스스로 NVS 에 남긴다. 간격은 아래에서 1분 → 5분 → 15분으로
- * 늘려서 200줄이 정확히 하루를 덮는다(40분 + 500분 + 900분 = 24시간).
- * 🚨 그래서 뒷부분은 15분 간격이다 — 기울기를 낼 때 줄 간격을 고정으로
- *    보면 안 된다. 충전이 시작되면 지우고 새로 쓴다 — 한 번 뽑은
- * 구간만 깨끗하게 담기게.
+/* ── the battery journal ──────────────────────────────────────
+ * Unplugged, there is nowhere for serial logs to go, so the badge writes this
+ * into NVS itself. The interval widens below from one minute to five to
+ * fifteen, so that 200 lines cover exactly one day (40 + 500 + 900 minutes).
+ * 🚨 Which means the later part is at fifteen-minute spacing — do not assume
+ *    a fixed interval when computing a slope.
  *
- * 아침에 케이블 꽂으면 부팅 로그에 표로 뱉는다. */
+ * Plug it in in the morning and the boot log prints it as a table. */
 #define JRN_MAX 200
-/* 🚨 sec 가 uint16 이면 18.2시간에서 넘친다 — 하루를 못 담는다. uint32 로.
- * flags: bit0 = 화면 켜짐, bit1~5 = 그때 하던 일(port_crumb 값).
- * 이러면 평소처럼 쓰기만 해도 "어느 앱이 얼마나 먹나"가 저절로 쌓인다. */
+/* 🚨 A uint16 `sec` overflows at 18.2 hours and cannot hold a day. uint32.
+ * flags: bit0 = display on, bits 1-5 = what was happening (the port_crumb
+ * value). That way normal use accumulates "which app costs what" for free. */
 typedef struct { uint32_t sec; uint16_t mv; uint8_t pct; uint8_t flags; } jrn_t;
 #define JRN_SCR(f)   ((f) & 1)
 #define JRN_CRUMB(f) (((f) >> 1) & 0x1F)
-/* 이 줄 앞에서 끊겼다는 표시 — 충전했거나 재부팅했다. 이 경계를 가로질러
- * 기울기를 내면 안 된다(충전하면 전압이 도로 올라가니 값이 뒤집힌다). */
+/* Marks a break before this line — a charge or a reboot. A slope must never
+ * be taken across this boundary (charging pushes the voltage back up and the
+ * value inverts). */
 #define JRN_BREAK    0x40
 static jrn_t   s_jrn[JRN_MAX];
 static uint16_t s_jrn_n;
 static bool     s_jrn_loaded;
 
-/* 🚨 일지 구조가 바뀌면 NVS 에 남은 옛 데이터를 새 자리로 읽어 쓰레기가 된다
- * (0907: sec 를 uint16→uint32, scr→flags 로 바꾸고 그대로 겪었다).
- * 판 번호를 같이 저장해서 다르면 버린다. 구조를 손대면 이 숫자를 올릴 것. */
+/* 🚨 Changing the journal's structure makes old NVS data read into the new
+ * layout as garbage (it happened when sec went uint16 -> uint32 and scr ->
+ * flags). A version number is stored alongside and mismatches are discarded.
+ * Bump it whenever this struct changes. */
 #define JRN_VER 2
 
 static void jrn_load(void)
@@ -1835,14 +1899,14 @@ static void jrn_load(void)
     uint32_t n = 0, ver = 0;
     nvs_get_u32(nh, "jrnv", &ver);
     nvs_get_u32(nh, "jrnn", &n);
-    if (ver != JRN_VER) { n = 0; ESP_LOGI("batt", "일지 형식이 바뀌었다 — 옛 기록 버림"); }
+    if (ver != JRN_VER) { n = 0; ESP_LOGI("batt", "journal format changed — discarding the old one"); }
     if (n > JRN_MAX) n = 0;
     if (n && nvs_get_blob(nh, "jrn", s_jrn, &len) == ESP_OK) s_jrn_n = (uint16_t)n;
     nvs_close(nh);
 }
 
-/* 일지 한 줄. 예전엔 port_battery_log 안에만 있었는데, 화면을 켜고 끄는
- * 자리에서도 남겨야 해서 밖으로 뺐다. */
+/* One journal line. This used to live inside port_battery_log, and was pulled
+ * out because the display on/off path has to write one too. */
 static void jrn_put(int64_t now, int mv, int pct, bool scr, bool brk);
 
 static void jrn_save(void)
@@ -1856,43 +1920,47 @@ static void jrn_save(void)
     nvs_close(nh);
 }
 
-/* ── 부팅 기록 ────────────────────────────────────────────────
- * "왜 재부팅됐나"는 사유만으론 안 풀린다. 죽기 직전에 뭘 하고 있었는지,
- * 얼마나 켜져 있었는지, 배터리가 얼마였는지가 같이 있어야 좁혀진다.
+/* ── the boot record ──────────────────────────────────────────
+ * "Why did it reboot" is not answerable from the reason alone. What it was
+ * doing just before, how long it had been up, and what the battery was at all
+ * narrow it down, so they are recorded together.
  *
- * 🚨 이 기록은 어떤 경우에도 스스로 지우지 않는다. 읽으려면 케이블을 꽂아야
- * 하는데 꽂는 순간 지워지면 아무 소용이 없다(0906 에 배터리 일지를 그렇게
- * 날렸다). 지우는 건 사람이 badge-diag.sh --clear 로만 한다. */
+ * 🚨 This record never erases itself under any circumstances. Reading it
+ * means plugging in, and if plugging in wiped it there would be no point (a
+ * night of battery journal was lost that way once). Only a person clears it,
+ * with badge-diag.sh --clear. */
 #define BOOT_MAX 12
 typedef struct {
     uint8_t  reason;    /* esp_reset_reason_t */
-    uint8_t  pct;       /* 부팅 시 배터리 % */
-    uint8_t  crumb;     /* 죽기 직전 하던 일 (port_crumb) */
-    uint8_t  rep;       /* 같은 것이 이어서 몇 번 더 있었나 (0 = 한 번뿐) */
-    uint32_t ran_sec;   /* 그 전에 몇 초나 켜져 있었나 */
+    uint8_t  pct;       /* battery % at boot */
+    uint8_t  crumb;     /* what it was doing just before (port_crumb) */
+    uint8_t  rep;       /* how many identical ones followed (0 = just the one) */
+    uint32_t ran_sec;   /* how long it had been running before that */
 } boot_rec_t;
 
 static const char *CRUMB_NAME[] = {
-    "부팅직후", "홈", "잠금화면", "화면끔", "화면켬",
-    "앱열기", "마우스", "회의", "게임", "계산기", "시계", "설정", "녹음중",
+    "just booted", "home", "lock", "screen off", "screen on",
+    "opening app", "mouse", "meeting", "game", "calc", "clock", "settings", "recording",
 };
 #define CRUMB_N (sizeof(CRUMB_NAME)/sizeof(CRUMB_NAME[0]))
 
 static uint8_t s_crumb;
 
-/* 지금 뭘 하는지 남긴다. 전환 때만 부르므로 플래시 마모는 무시할 수준. */
+/* Note what is happening now. Only called on transitions, so flash wear is negligible. */
 int port_crumb_now(void) { return (int)s_crumb; }
 
 void port_crumb(int what)
 {
     if (what < 0 || what >= (int)CRUMB_N || what == s_crumb) return;
 
-    /* 🚨 앱이 바뀌는 자리에 일지를 두 줄 남긴다 — 옛 앱 이름으로 하나(그 앱의
-     * 구간을 닫는다), 새 앱 이름으로 하나(다음 구간을 연다). 한 줄만 남기면
-     * 둘 중 한 앱의 구간이 통째로 사라진다. 두 줄의 시각이 같아 그 사이는
-     * 기울기 계산에서 저절로 빠진다(t <= 0 을 버린다).
-     * 🚨 화면이 켜져 있고 뽑혀 있을 때만. 꺼져 있으면 앱이 없고, 꽂혀 있으면
-     * 방전이 아니다. 앱을 빨리 오가도 일지가 안 넘치게 텀을 둔다. */
+    /* 🚨 Two journal lines are written where an app changes: one under the old
+     * app's name (closing its stretch) and one under the new (opening the
+     * next). With only one line, one of the two apps loses its stretch
+     * entirely. The two share a timestamp, so the gap between them falls out
+     * of the slope calculation by itself (t <= 0 is discarded).
+     * 🚨 Only while the display is on and the cable is out: off means there is
+     * no app, and plugged in is not a discharge. A cooldown stops rapid app
+     * switching from flooding the journal. */
     if (!port_battery_plugged() && !launcher_screen_is_off()) {
         static int64_t last_swap;
         int64_t now = esp_timer_get_time();
@@ -1901,9 +1969,9 @@ void port_crumb(int what)
             if (mv > 0 && pct >= 0) {
                 jrn_load();
                 last_swap = now;
-                jrn_put(now, mv, pct, true, false);          /* 옛 앱으로 닫는다 */
+                jrn_put(now, mv, pct, true, false);          /* close under the old app */
                 s_crumb = (uint8_t)what;
-                jrn_put(now, mv, pct, true, false);          /* 새 앱으로 연다 */
+                jrn_put(now, mv, pct, true, false);          /* open under the new one */
             }
         }
     }
@@ -1915,7 +1983,7 @@ void port_crumb(int what)
     nvs_close(nh);
 }
 
-/* 켜져 있는 동안 60초마다 불린다. 다음 부팅 때 "얼마나 살아 있었나"가 된다. */
+/* Called every 60 s while running. On the next boot this becomes "how long it was up". */
 void port_uptime_mark(void)
 {
     nvs_handle_t nh;
@@ -1928,14 +1996,14 @@ void port_uptime_mark(void)
 void port_reset_reason_note(int rr)
 {
     static const char *RNAME[] = {
-        "알수없음","전원켜짐","외부리셋","소프트리셋","패닉","인터럽트워치독",
-        "태스크워치독","기타워치독","딥슬립복귀","브라운아웃","SDIO",
-        "USB리셋","JTAG리셋","eFuse오류","전원글리치","CPU잠김",
+        "unknown","power on","external reset","software reset","panic","interrupt watchdog",
+        "task watchdog","other watchdog","deep sleep wake","brownout","SDIO",
+        "USB reset","JTAG reset","eFuse error","power glitch","CPU lockup",
     };
     nvs_handle_t nh;
     if (nvs_open("badge", NVS_READWRITE, &nh) != ESP_OK) return;
 
-    /* 직전 실행이 남긴 것 */
+    /* What the previous run left behind */
     uint32_t ran = 0; uint8_t crumb = 0;
     nvs_get_u32(nh, "up", &ran);
     nvs_get_u8(nh, "crumb", &crumb);
@@ -1953,19 +2021,20 @@ void port_reset_reason_note(int rr)
         .crumb  = crumb,
         .ran_sec = ran,
     };
-    /* 🚨 진단하러 케이블을 꽂는 것 자체가 USB 리셋이다. 60초를 못 채우면
-     * port_uptime_mark 가 한 번도 안 돌아 '직전 0초' 로 남는다. 12칸뿐인
-     * 기록에 이런 줄이 절반을 차지했다(0909: 12건 중 5건) — 읽으러 꽂을
-     * 때마다 진짜 기록이 한 칸씩 밀려난 것이다. 기록을 스스로 지우지
-     * 않는다는 원칙을 세워놓고, 정작 읽는 행위가 기록을 갉아먹고 있었다.
-     * 같은 것이 이어지면 새 칸을 쓰지 말고 세기만 한다. 패닉·워치독·
-     * 브라운아웃은 사유가 달라 여기 안 걸린다 — 뭉쳐도 안전하다. */
+    /* 🚨 Plugging in a cable to diagnose is itself a USB reset. Under sixty
+     * seconds, port_uptime_mark never runs once and the entry reads "up for
+     * 0 s". Those lines took half of a twelve-entry record (five of twelve) —
+     * every read pushed a real record out by one. Having declared that the
+     * record never erases itself, the act of reading it was eating it.
+     * Identical consecutive entries are now counted rather than given a new
+     * slot. Panics, watchdogs and brownouts have different reasons and do not
+     * collapse together, so this is safe. */
     if (n && rr == ESP_RST_USB && ran == 0
         && ring[n - 1].reason == (uint8_t)rr && ring[n - 1].ran_sec == 0) {
         if (ring[n - 1].rep < 255) ring[n - 1].rep++;
         ring[n - 1].pct = r.pct;
     } else {
-        if (n >= BOOT_MAX) {             /* 가장 오래된 걸 밀어낸다 */
+        if (n >= BOOT_MAX) {             /* push out the oldest */
             memmove(&ring[0], &ring[1], sizeof(boot_rec_t) * (BOOT_MAX - 1));
             n = BOOT_MAX - 1;
         }
@@ -1973,28 +2042,28 @@ void port_reset_reason_note(int rr)
     }
     nvs_set_blob(nh, "boot", ring, sizeof(boot_rec_t) * n);
     nvs_set_u32(nh, "bootn", n);
-    nvs_set_u32(nh, "up", 0);            /* 새 구간 시작 */
+    nvs_set_u32(nh, "up", 0);            /* a new stretch begins */
     nvs_commit(nh);
     nvs_close(nh);
 
-    ESP_LOGI("rst", "─── 부팅 기록 %lu개 (최근이 아래) ───", (unsigned long)n);
+    ESP_LOGI("rst", "─── boot record, %lu entries (most recent last) ───", (unsigned long)n);
     for (uint32_t i = 0; i < n; i++) {
         const char *rn = ring[i].reason < 16 ? RNAME[ring[i].reason] : "?";
         const char *cn = ring[i].crumb < CRUMB_N ? CRUMB_NAME[ring[i].crumb] : "?";
         char rep[28] = "";
         if (ring[i].rep)
-            snprintf(rep, sizeof(rep), "  x%u (꽂은 것)", (unsigned)ring[i].rep + 1);
-        ESP_LOGI("rst", "  %2lu) %-10s  직전 %5lu초 켜짐  배터리 %3u%%  하던일=%s%s",
+            snprintf(rep, sizeof(rep), "  x%u (cable)", (unsigned)ring[i].rep + 1);
+        ESP_LOGI("rst", "  %2lu) %-14s  up %5lu s before  battery %3u%%  doing=%s%s",
                  (unsigned long)i + 1, rn, (unsigned long)ring[i].ran_sec,
                  ring[i].pct, cn, rep);
     }
-    ESP_LOGI("rst", "  ※ 패닉/워치독이 '화면켬'에서 반복되면 깨우는 경로가 범인이다");
+    ESP_LOGI("rst", "  note: panics or watchdogs repeating at 'screen on' point at the wake path");
 }
 
 void port_battery_journal_dump(void)
 {
-    /* 일지가 날아가도 이건 남는다 — 실제로 관측한 "1% 당 몇 분"이다.
-     * 방전 중 1%가 떨어질 때마다 갱신되어 NVS 에 쌓인 값. */
+    /* This survives even if the journal does not — the observed "minutes per
+     * percent", updated on every 1% drop while discharging and kept in NVS. */
     {
         nvs_handle_t nh;
         uint32_t v = 0;
@@ -2007,17 +2076,17 @@ void port_battery_journal_dump(void)
             nvs_get_u32(nh, "mah", &mah);
             nvs_close(nh);
         }
-        if (mah) ESP_LOGI("batt", "측정된 배터리 용량 약 %lumAh", (unsigned long)mah);
+        if (mah) ESP_LOGI("batt", "measured battery capacity, about %lu mAh", (unsigned long)mah);
         if (v) {
             float mpp = v / 100.0f;
-            ESP_LOGI("batt", "학습된 소모율(전체 하나): 1%%당 %.1f분 → 100%%면 %.1f시간 (시간당 %.1f%%)",
+            ESP_LOGI("batt", "learned rate (single): %.1f min/%%  ->  %.1f h for 100%% (%.1f%%/h)",
                      mpp, mpp * 100.0f / 60.0f, 60.0f / mpp);
         } else {
-            ESP_LOGI("batt", "학습된 소모율 없음");
+            ESP_LOGI("batt", "no learned rate yet");
         }
-        /* 🚨 구간별로 나눠 배운 값. 이게 안 갈리면 남은 시간이 양 끝에서
-         * 틀린다(0909: 86%에서 15h46m 이라 띄웠는데 일지는 23시간이었다).
-         * 세 값이 서로 달라지기 시작하면 제대로 배우는 중이다. */
+        /* 🚨 The per-band values. Until they diverge, the remaining time is
+         * wrong at both ends (it showed 15h46m at 86% while the journal said
+         * 23 hours). Three values drifting apart means it is learning properly. */
         mpp_load();
         {
             char line[128]; int off = 0;
@@ -2026,94 +2095,101 @@ void port_battery_journal_dump(void)
                 off += snprintf(line + off, sizeof(line) - off, "%s%d~%d%%:",
                                 b ? "  " : "", BAND_LO[b], hi);
                 if (s_mpp[b] <= 0)
-                    off += snprintf(line + off, sizeof(line) - off, "아직");
+                    off += snprintf(line + off, sizeof(line) - off, "not yet");
                 else if (s_mpp_seen[b] == 0)
-                    /* 안 재봤다. 옛 단일 값을 빌려 쓰는 중이라고 밝힌다. */
+                    /* Never measured. Say that it is borrowing the old single value. */
                     off += snprintf(line + off, sizeof(line) - off,
-                                    "%.1f분/%%(빌림)", s_mpp[b]);
+                                    "%.1f min/%%(borrowed)", s_mpp[b]);
                 else
                     off += snprintf(line + off, sizeof(line) - off,
-                                    "%.1f분/%%(%d회)", s_mpp[b], s_mpp_seen[b]);
+                                    "%.1f min/%%(%d samples)", s_mpp[b], s_mpp_seen[b]);
             }
-            ESP_LOGI("batt", "구간별 소모율: %s", line);
+            ESP_LOGI("batt", "per-band rate: %s", line);
         }
         {
             int left = port_battery_minutes_left();
-            if (left > 0) ESP_LOGI("batt", "지금 잔량으로 남은 시간 %dh %02dm (구간을 이어 더한 값)",
+            if (left > 0) ESP_LOGI("batt", "time left at this level: %dh %02dm (bands summed)",
                                    left / 60, left % 60);
         }
     }
     jrn_load();
-    if (!s_jrn_n) { ESP_LOGI("batt", "일지 비어 있음"); return; }
-    ESP_LOGI("batt", "─── 배터리 일지 %u줄 (화면 O/X) ───", s_jrn_n);
+    if (!s_jrn_n) { ESP_LOGI("batt", "journal empty"); return; }
+    ESP_LOGI("batt", "─── battery journal, %u lines (display O/X) ───", s_jrn_n);
     for (uint16_t i = 0; i < s_jrn_n; i++) {
         uint8_t cb = JRN_CRUMB(s_jrn[i].flags);
         if (s_jrn[i].flags & JRN_BREAK)
-            ESP_LOGI("batt", "  ──── 여기서 끊김 (충전했거나 재부팅) ────");
-        ESP_LOGI("batt", "%6lu초  %4umV  %3u%%  화면%s  %s",
+            ESP_LOGI("batt", "  ──── break here (charged or rebooted) ────");
+        ESP_LOGI("batt", "%6lu s  %4u mV  %3u%%  display %s  %s",
                  (unsigned long)s_jrn[i].sec, s_jrn[i].mv, s_jrn[i].pct,
                  JRN_SCR(s_jrn[i].flags) ? "O" : "X",
                  cb < CRUMB_N ? CRUMB_NAME[cb] : "?");
     }
 
-    /* 화면 켠 구간과 끈 구간의 전압 기울기를 따로 낸다. 둘의 차이가
-     * 곧 "화면이 먹는 몫"이다. %는 4~5분에 한 칸이라 너무 굵어서 mV 로 본다. */
+    /* Voltage slope for display-on and display-off stretches, separately. The
+     * difference between them is what the display costs. Percent only moves
+     * every four or five minutes, which is too coarse, so this works in mV. */
     for (int mode = 0; mode < 2; mode++) {
         long dt = 0; long dv = 0; int seg = 0;
         for (uint16_t i = 1; i < s_jrn_n; i++) {
-            if (s_jrn[i].flags & JRN_BREAK) continue;   /* 충전·재부팅을 가로지르면 값이 뒤집힌다 */
+            if (s_jrn[i].flags & JRN_BREAK) continue;   /* across a charge or reboot the value inverts */
             if (JRN_SCR(s_jrn[i].flags) != mode || JRN_SCR(s_jrn[i-1].flags) != mode) continue;
             long t = (long)s_jrn[i].sec - (long)s_jrn[i-1].sec;
-            int v = (int)s_jrn[i-1].mv - (int)s_jrn[i].mv;   /* 떨어진 양 */
-            if (t <= 0 || t > 1200) continue;                /* 재부팅으로 끊긴 구간은 버린다 */
+            int v = (int)s_jrn[i-1].mv - (int)s_jrn[i].mv;   /* how far it fell */
+            if (t <= 0 || t > 1200) continue;                /* discard stretches broken by a reboot */
             dt += t; dv += v; seg++;
         }
         if (seg && dt > 0) {
-            ESP_LOGI("batt", "── 화면%s: %ld초 동안 %ldmV 내려감 → 시간당 %.0fmV (표본 %d)",
+            ESP_LOGI("batt", "── display %s: %ld mV over %ld s -> %.0f mV/h (%d samples)",
                      mode ? "O" : "X", dt, dv, dv * 3600.0 / dt, seg);
         } else {
-            ESP_LOGI("batt", "── 화면%s: 표본 부족", mode ? "O" : "X");
+            ESP_LOGI("batt", "── display %s: not enough samples", mode ? "O" : "X");
         }
     }
-    /* 앱별 소모 — 화면 켜진 구간만, 하던 일별로 나눠 낸다.
-     * "시계 앱이 잠금화면보다 몇 배 먹나" 같은 질문에 이게 답한다.
+    /* Per-app consumption — display-on stretches only, split by what was
+     * running. This is what answers "how many times more does the Clock app
+     * cost than the lock screen".
      *
-     * 🚨 이 값은 앱을 **한 번에 몇 분씩** 써야 쌓인다. 잠깐씩 들락거리면
-     * 구간이 전부 문턱 아래라 한 줄도 안 나온다 — 그게 맞는 동작이다.
-     * 전압으로 재는 물건의 한계다(이 보드엔 쿨롱 카운터가 없다). */
-    #define APP_SEG_MIN 120   /* 초. 이보다 짧은 구간은 회복 곡선이라 버린다 */
+     * 🚨 These only accumulate if an app is used for **minutes at a time**.
+     * Dipping in and out leaves every stretch under the threshold and prints
+     * nothing — which is the correct behaviour. It is the limit of measuring
+     * by voltage (this board has no coulomb counter). */
+    #define APP_SEG_MIN 120   /* seconds. Anything shorter is a recovery curve; discard it */
     for (unsigned c = 0; c < CRUMB_N; c++) {
         long dt = 0, dv = 0; int seg = 0;
         for (uint16_t i = 1; i < s_jrn_n; i++) {
-            if (s_jrn[i].flags & JRN_BREAK) continue;   /* 충전·재부팅을 가로지르면 값이 뒤집힌다 */
-            /* 🚨 예전엔 두 줄의 '하던 일' 이 **둘 다** 같아야 셌다. 그런데
-             * 화면 켠 구간은 거의 늘 앱이 바뀌면서 끝난다 — 켤 땐 잠금화면,
-             * 끌 땐 홈 이런 식이라 짝이 하나도 안 맞았다. 그래서 일지에
-             * 화면O 가 아홉 줄이나 쌓였는데도 앱별 값이 한 줄도 안 나왔다
-             * (0910 실기). 구간은 그것을 **시작한** 앱에게 준다. */
+            if (s_jrn[i].flags & JRN_BREAK) continue;   /* across a charge or reboot the value inverts */
+            /* 🚨 This used to require **both** lines to name the same app. But
+             * a display-on stretch almost always ends with the app changing —
+             * the lock screen on the way in, home on the way out — so nothing
+             * ever matched. Nine display-on lines in the journal produced not
+             * one per-app figure. A stretch is now credited to the app that
+             * **started** it. */
             if (JRN_CRUMB(s_jrn[i-1].flags) != c) continue;
             if (!JRN_SCR(s_jrn[i].flags) || !JRN_SCR(s_jrn[i-1].flags)) continue;
             long t = (long)s_jrn[i].sec - (long)s_jrn[i-1].sec;
             long v = (long)s_jrn[i-1].mv - (long)s_jrn[i].mv;
-            /* 🚨 짧은 구간은 소모가 아니라 **전압 회복**을 잰다. 부하가 줄면
-             * 배터리 내부저항 때문에 전압이 도로 올라간다 — 0911 일지에
-             * 30초 만에 15mV 오른 줄이 있었다(시간당 +1800mV 짜리 헛값이다).
-             * 그런 줄이 몇 개만 섞여도 합이 뒤집힌다: [홈] 이 시간당 -33mV,
-             * [잠금화면] 이 게임보다 높은 600mV 로 나왔다. 검은 시계가 게임보다
-             * 많이 먹을 리가 없다.
-             * 눌림(sag)과 회복은 수십 초면 잦아드므로 그보다 긴 것만 센다. */
+            /* 🚨 A short stretch measures **voltage recovery**, not
+             * consumption. When load drops the voltage climbs back up through
+             * the internal resistance — the journal had a line 15 mV higher
+             * after thirty seconds, which is a nonsense +1800 mV/h.
+             * A handful of those inverts the total: [home] came out at
+             * -33 mV/h and [lock screen] at 600, higher than a game. A black
+             * clock face cannot cost more than a game.
+             * Sag and recovery settle within tens of seconds, so only longer
+             * stretches count. */
             if (t < APP_SEG_MIN || t > 1200) continue;
             dt += t; dv += v; seg++;
         }
-        /* 🚨 표본이 얇으면 아예 안 찍는다. 틀린 숫자보다 "아직 모른다" 가 낫다 —
-         * 사람이 그 숫자를 믿고 판단하기 때문이다. */
+        /* 🚨 Print nothing when the sample is thin. "Not known yet" beats a
+         * wrong number, because people act on numbers. */
         if (seg >= 2 && dt >= 600)
-            ESP_LOGI("batt", "── [%s] 켜진 채 %ld분 → 시간당 %.0fmV (표본 %d)",
+            ESP_LOGI("batt", "── [%s] on for %ld min -> %.0f mV/h (%d samples)",
                      CRUMB_NAME[c], dt / 60, dv * 3600.0 / dt, seg);
     }
 
-    /* 🚨 처음부터 끝까지로 재면 충전 구간을 가로지른다(전압도 %도 도로 올라간다).
-     * 마지막으로 끊긴 자리부터만 본다 — 그게 "지금 이어지는 한 판"이다. */
+    /* 🚨 Measuring end to end crosses charge boundaries (both voltage and
+     * percent go back up). Only from the last break onward — that is "the
+     * stretch currently running". */
     uint16_t seg0 = 0;
     for (uint16_t i = s_jrn_n; i-- > 0; ) {
         if (s_jrn[i].flags & JRN_BREAK) { seg0 = i; break; }
@@ -2122,18 +2198,20 @@ void port_battery_journal_dump(void)
         long dsec = (long)s_jrn[s_jrn_n-1].sec - (long)s_jrn[seg0].sec;
         int dpct = (int)s_jrn[seg0].pct - (int)s_jrn[s_jrn_n-1].pct;
         if (dsec > 0 && dpct > 0)
-            ESP_LOGI("batt", "── 마지막 구간 %ld분에 %d%% → 시간당 %.1f%%, 100%%면 %.1f시간 (%u줄 중 %u줄째부터)",
+            ESP_LOGI("batt", "── last stretch: %d%% in %ld min -> %.1f%%/h, %.1f h for 100%% (from line %u of %u)",
                      dsec / 60, dpct, dpct * 3600.0 / dsec, dsec * 100.0 / dpct / 3600.0,
                      s_jrn_n, (unsigned)(seg0 + 1));
     }
 }
 
-/* ── 배터리 용량 역산 ─────────────────────────────────────────
- * 웨이브셰어가 용량을 어디에도 안 적어놨다(자기네 문서 확인). 그런데 충전
- * 전류를 아니까 시간으로 역산할 수 있다:
- *     용량(mAh) ≈ 충전전류(mA) x 걸린시간(h) / 채운비율
- * 충전이 시작될 때의 %와 시각을 잡아두고, 100% 에 닿으면 계산해 NVS 에 남긴다.
- * 정전압 구간에서는 전류가 줄어드니 실제보다 조금 작게 나온다 — 하한으로 본다. */
+/* ── working out the battery capacity ─────────────────────────
+ * Waveshare does not state the capacity anywhere (checked their own docs).
+ * But the charge current is known, so it can be worked back from time:
+ *     capacity (mAh) ~= charge current (mA) x hours / fraction filled
+ * The percentage and time are captured when charging starts, and the sum is
+ * done when it reaches 100% and written to NVS.
+ * The current tapers during constant-voltage, so the answer comes out
+ * slightly low — treat it as a lower bound. */
 #define CHG_MA 200
 
 static void charge_track(int pct, bool plugged)
@@ -2142,9 +2220,9 @@ static void charge_track(int pct, bool plugged)
     static int      start_pct;
     static int64_t  start_us;
 
-    if (plugged && !was) {                 /* 방금 꽂혔다 */
+    if (plugged && !was) {                 /* just plugged in */
         was = true; start_pct = pct; start_us = esp_timer_get_time();
-        ESP_LOGI("axp", "충전 시작 %d%% — 100%% 까지 재서 용량을 낸다", pct);
+        ESP_LOGI("axp", "charging from %d%% — timing to 100%% to get the capacity", pct);
         return;
     }
     if (!plugged) { was = false; return; }
@@ -2154,21 +2232,21 @@ static void charge_track(int pct, bool plugged)
     float filled = (100 - start_pct) / 100.0f;
     if (hours < 0.15f || filled < 0.15f) { start_pct = -1; return; }
     int mah = (int)(CHG_MA * hours / filled);
-    ESP_LOGI("axp", "★ 용량 추정 %dmAh  (%d%%→100%%, %.2f시간, %dmA)",
+    ESP_LOGI("axp", "capacity estimate %d mAh  (%d%% -> 100%%, %.2f h, %d mA)",
              mah, start_pct, hours, CHG_MA);
     nvs_handle_t nh;
     if (nvs_open("badge", NVS_READWRITE, &nh) == ESP_OK) {
         nvs_set_u32(nh, "mah", (uint32_t)mah);
         nvs_commit(nh); nvs_close(nh);
     }
-    start_pct = -1;                        /* 한 번만 */
+    start_pct = -1;                        /* once only */
 }
 
 void port_battery_log(const char *what)
 {
     static int64_t last;
     int64_t now = esp_timer_get_time();
-    if (last && now - last < 25000000LL) return;   /* 25초 가드 — 런처가 60초마다 부른다 */
+    if (last && now - last < 25000000LL) return;   /* 25 s guard — the launcher calls every 60 */
     last = now;
     int mv = port_battery_mv();
     if (mv < 0) return;
@@ -2178,38 +2256,40 @@ void port_battery_log(const char *what)
     ESP_LOGI("batt", "%s t=%llds %dmV %d%% %s", what ? what : "-",
              (long long)(now / 1000000), mv, pct, plug ? "(USB)" : "");
 
-    /* 🚨 예전엔 "충전이 시작되면 지운다"였는데, 일지를 읽으려면 케이블을 꽂아야
-     * 한다. 꽂는 순간 지워져서 밤새 잰 걸 통째로 잃었다(0906). 자기모순이었다.
-     * 이제는 지우지 않는다 — 다음 방전이 "시작될 때"만 새로 연다. */
+    /* 🚨 This used to erase the journal when charging started, but reading the
+     * journal means plugging in — so plugging in destroyed a whole night of
+     * measurements. It was self-defeating.
+     * It is never erased now; a new discharge only opens a new stretch. */
     jrn_load();
     static int64_t last_jrn;
     static bool    was_plugged;
     if (plug) {
         was_plugged = true;
-        return;                       /* 충전 중엔 적지도, 지우지도 않는다 */
+        return;                       /* while charging, neither write nor erase */
     }
-    /* 🚨 예전엔 뽑을 때마다 일지를 통째로 지웠다. 그러면 낮에 잠깐 충전하고
-     * 다시 뽑는 순간 오전 기록이 다 날아간다(0909 에 그 계획을 듣고 발견).
-     * 지우지 않고 "여기서 끊겼다"는 표시만 남기고 이어 쓴다. 표시를 보고
-     * 기울기 계산이 그 경계를 안 넘게 한다. */
+    /* 🚨 It also used to wipe the journal on every unplug, so charging briefly
+     * during the day destroyed the morning's record. Nothing is erased: a
+     * "break here" mark is written and it continues. The slope calculation
+     * reads that mark and refuses to cross it. */
     static bool mark_break;
     if (was_plugged) {
         was_plugged = false;
         mark_break = true;
-        ESP_LOGI("batt", "케이블 빠짐 — 일지에 경계만 남기고 이어 쓴다");
+        ESP_LOGI("batt", "cable out — marking a break and continuing");
     }
-    if (!last_jrn) mark_break = true;   /* 부팅 직후 첫 줄도 끊긴 자리다(초가 0으로 돌아간다) */
+    if (!last_jrn) mark_break = true;   /* the first line after boot is a break too (seconds restart) */
 
-    /* 자리가 차면 멈추는 게 아니라 오래된 것부터 버린다. 어제 것 지키려다
-     * 오늘 것을 못 적으면 본말이 뒤집힌다. */
+    /* When it fills, drop the oldest rather than stopping. Losing today to
+     * preserve yesterday has it backwards. */
     if (s_jrn_n >= JRN_MAX) {
         uint16_t drop = JRN_MAX / 4;
         memmove(s_jrn, s_jrn + drop, sizeof(jrn_t) * (JRN_MAX - drop));
         s_jrn_n = JRN_MAX - drop;
-        if (s_jrn_n) s_jrn[0].flags |= JRN_BREAK;   /* 앞이 잘렸으니 여기도 경계다 */
+        if (s_jrn_n) s_jrn[0].flags |= JRN_BREAK;   /* the front was cut, so this is a break too */
     }
-    /* 처음 40줄은 1분(기울기를 빨리 얻는다), 그 다음 100줄은 5분,
-     * 그 뒤는 15분. 200줄로 정확히 하루(40분 + 500분 + 900분 = 24시간)를 덮는다. */
+    /* The first 40 lines are a minute apart (for a quick slope), the next 100
+     * five minutes, the rest fifteen. 200 lines cover exactly one day
+     * (40 + 500 + 900 minutes = 24 hours). */
     int64_t gap = (s_jrn_n < 40)  ? 60000000LL
                 : (s_jrn_n < 140) ? 300000000LL
                                   : 900000000LL;
@@ -2234,36 +2314,40 @@ static void jrn_put(int64_t now, int mv, int pct, bool scr, bool brk)
     jrn_save();
 }
 
-/* 🚨 화면을 켜 둔 동안의 소모를 여태 한 번도 못 쟀다. 일지가 시간만 보고
- * 적는데(1분→5분→15분) 화면은 30초면 꺼지니, '화면O' 두 줄이 연달아 나올
- * 수가 없었다. 기울기는 이웃한 두 줄이 둘 다 화면O 여야 나온다 — 그래서
- * 186줄을 쌓고도 "화면O: 표본 부족" 이었다(0909 실기). 가장 크게 먹는
- * 요인이 통째로 측정 밖에 있었다.
+/* 🚨 Consumption with the display on had never once been measured. The
+ * journal writes on a timer (1 -> 5 -> 15 minutes) and the display sleeps
+ * after thirty seconds, so two consecutive display-on lines could not happen.
+ * A slope needs two neighbours both marked display-on — which is why 186
+ * lines still reported "display O: not enough samples". The single largest
+ * consumer was entirely outside the measurement.
  *
- * 이제 켜는 자리와 끄기 직전에 한 줄씩 남긴다. 둘은 이웃이고 둘 다 화면O 라
- * 사이 구간이 곧 화면을 켜 둔 시간이다.
- * 🚨 끄기 '직전' 에 불러야 한다. 끄고 나서 부르면 화면X 로 적혀 짝이 깨진다. */
+ * Now a line is written where it is switched on and again just before it goes
+ * off. Those two are neighbours and both are display-on, so the stretch
+ * between them is exactly the time the display was on.
+ * 🚨 It has to be called *before* switching off. Called after, it records
+ * display-off and the pair is broken. */
 void port_battery_mark(bool screen_on)
 {
     static int64_t last_mark;
-    if (port_battery_plugged()) return;          /* 꽂혀 있으면 방전이 아니다 */
+    if (port_battery_plugged()) return;          /* plugged in is not a discharge */
     int64_t now = esp_timer_get_time();
-    if (last_mark && now - last_mark < 15000000LL) return;   /* 깜빡임 방지 */
+    if (last_mark && now - last_mark < 15000000LL) return;   /* debounce flicker */
     int mv  = port_battery_mv();
     int pct = port_battery_percent();
     if (mv <= 0 || pct < 0) return;
     jrn_load();
-    if (s_jrn_n >= JRN_MAX) return;              /* 자리 정리는 평소 경로에 맡긴다 */
+    if (s_jrn_n >= JRN_MAX) return;              /* leave trimming to the normal path */
     last_mark = now;
     jrn_put(now, mv, pct, screen_on, false);
 }
 
-/* ── CPU 가 실제로 얼마나 깨어 있나 ───────────────────────────
- * 배터리로 재려면 케이블을 뽑아야 하지만, "CPU 가 일한 비율"은 꽂아둔 채로
- * 잴 수 있다. 화면이 꺼진 동안 노는 시간이 늘수록 전류가 준다 —
- * 폴링을 줄인 게 실제로 먹혔는지 이걸로 확인한다.
+/* ── how much the CPU is actually awake ───────────────────────
+ * Measuring with the battery means unplugging, but "what fraction of the time
+ * the CPU is working" can be measured plugged in. More idle time with the
+ * display off means less current — which is how to tell whether cutting a
+ * poll actually helped.
  *
- * 두 시점의 태스크별 누적 실행시간을 빼서 그 사이 구간만 본다. */
+ * Two snapshots of per-task run time are subtracted to isolate the interval. */
 #include "freertos/task.h"
 
 #define CPU_MAX_TASKS 24
@@ -2292,7 +2376,7 @@ void port_cpu_report(const char *when)
     uint32_t total = 0;
     UBaseType_t n = uxTaskGetSystemState(st, CPU_MAX_TASKS, &total);
     uint32_t span = total - s_snap_total;
-    if (!span) { ESP_LOGW("cpu", "%s: 잰 구간이 없다", when); return; }
+    if (!span) { ESP_LOGW("cpu", "%s: nothing measured", when); return; }
 
     uint32_t idle = 0;
     ESP_LOGI("cpu", "─── %s ───", when);
@@ -2306,35 +2390,36 @@ void port_cpu_report(const char *when)
         if (strncmp(nm, "IDLE", 4) == 0) { idle += d; continue; }
         if (pct10 >= 3) ESP_LOGI("cpu", "  %-14s %4d.%d%%", nm, pct10 / 10, pct10 % 10);
     }
-    /* 코어가 둘이라 노는 시간의 최대치는 200% 다. 100 으로 환산한다. */
+    /* Two cores, so idle time tops out at 200%. Normalised to 100. */
     int idle10 = (int)((uint64_t)idle * 1000 / span / 2);
-    ESP_LOGI("cpu", "  ▸ 노는 비율 %d.%d%%  (일한 비율 %d.%d%%)",
+    ESP_LOGI("cpu", "  idle %d.%d%%  (busy %d.%d%%)",
              idle10 / 10, idle10 % 10, (1000 - idle10) / 10, (1000 - idle10) % 10);
 }
 
 
-/* ── 건강 검사 ────────────────────────────────────────────────
- * 0907 밤 교훈: "안 뻗었다"는 기계 기준이고 사람 기준은 "화면·터치·소리가
- * 되나"다. 그리기가 1만 3천 번 실패하는 동안에도 워치독은 안 물었고, 나는
- * 그걸 "통과"라고 불렀다. 증상도 원인도 둘 다 못 잡은 것이다.
+/* ── health checks ────────────────────────────────────────────
+ * The lesson from one long night: "it did not crash" is the machine's
+ * standard, and a person's is "does the display, the touch and the sound
+ * work". The watchdog stayed quiet through thirteen thousand failed draws,
+ * and that got called a pass — missing both the symptom and the cause.
  *
- * 그래서 두 가지를 둔다:
- *  1) 어떤 오류든 나면 센다 — 내가 미리 생각 못 한 것까지 걸리게
- *  2) 출력이 실제로 나오는지 직접 확인한다 (터치 칩이 대답하나)
- */
+ * So there are two things here:
+ *  1) count every error of any kind, including ones nobody thought of
+ *  2) check directly that the outputs work (does the touch chip answer?) */
 #include "esp_log.h"
 
 static volatile uint32_t s_err_n, s_warn_n, s_err_known;
 static vprintf_like_t    s_log_next;
 
-/* 🚨 세기만 하면 그것도 현상이다. 터진 순간의 "왜"를 같이 붙잡는다.
- * 그리기 실패는 사실 메모리 문제였는데, 횟수만 세면 그걸 못 본다.
- * 첫 오류가 났을 때의 자원 상태를 찍어두면 증상과 원인이 한 줄에 붙는다. */
+/* 🚨 Counting alone is still only a symptom. Capture the "why" at the moment
+ * it breaks. The failed draws turned out to be a memory problem, and a count
+ * would never have shown that. Recording the resource state at the first
+ * error puts symptom and cause on one line. */
 static char     s_err_first[56];
 static uint32_t s_err_free, s_err_big;
-static uint8_t  s_err_ctx;          /* bit0 BLE 연결 · bit1 녹음중 · bit2 화면꺼짐 */
+static uint8_t  s_err_ctx;          /* bit0 BLE connected, bit1 recording, bit2 display off */
 
-/* 서식을 실제 문장으로 풀어 특정 문구가 있는지 본다 */
+/* Expand the format into the real sentence and look for a given phrase in it */
 static bool fmt_has(const char *fmt, va_list ap, const char *needle)
 {
     char line[160];
@@ -2347,19 +2432,23 @@ static bool fmt_has(const char *fmt, va_list ap, const char *needle)
 static int log_hook(const char *fmt, va_list ap)
 {
     if (fmt && fmt[0] == 'E') {
-        /* 🚨 이미 원인을 아는 무해한 오류는 따로 센다. 섞어 세면 개수만
-         * 늘어 진짜 오류를 가린다 — 그렇다고 지우지는 않는다. 아는 것만
-         * 빼고, 왜 무해한지는 여기 적어둔다.
+        /* 🚨 Harmless errors with a known cause are counted separately.
+         * Mixing them in only inflates the count and hides real ones — but
+         * they are not suppressed either. Only the known ones are set aside,
+         * with the reason they are harmless written here.
          *
-         * i2s_channel_disable "not been enabled yet":
-         *   마이크 코덱 핸들이 송·수신 한 몸이라 닫을 때 안 쓴 송신 채널까지
-         *   끄려 든다(로그의 paired out_enable: 0). 녹음 자체는 정상으로
-         *   기록된다(0908 검증에서 15건 다 남았다). 벤더 부품 안쪽이라 손 안 댄다. */
+         *   The microphone codec handle covers transmit and receive as one
+         *   object, so closing it also tries to disable the transmit channel
+         *   that was never used (the log's "paired out_enable: 0"). The
+         *   recording itself completes normally — all fifteen were present in
+         *   the verification run. It is inside a vendor component and is left
+         *   alone. */
         if (fmt_has(fmt, ap, "has not been enabled yet")) { s_err_known++; goto pass; }
         if (s_err_n++ == 0) {
-            /* 🚨 서식 문자열만 베끼면 "E (%lu) %s: %s(" 만 남아 쓸모없다
-             * (0907 밤에 그렇게 해서 원인을 못 봤다). va_copy 로 안전하게
-             * 풀어서 실제 문장을 남긴다. */
+            /* 🚨 Copying only the format string leaves "E (%lu) %s: %s(",
+             * which is useless (an entire night was spent unable to see the
+             * cause because of that). va_copy expands it safely so the real
+             * sentence is kept. */
             va_list cp;
             va_copy(cp, ap);
             vsnprintf(s_err_first, sizeof s_err_first, fmt, cp);
@@ -2382,27 +2471,29 @@ void port_health_begin(void)
     s_err_first[0] = 0;
 }
 
-/* 사람이 보는 것들이 실제로 살아 있나. 0 이면 정상. */
+/* Are the things a person sees actually alive? Zero means everything is fine. */
 int port_health_check(char *out, size_t len)
 {
     int bad = 0;
-    char tp[24] = "확인불가";
+    char tp[24] = "unknown";
 
-    /* 터치 칩이 살아있나 — I2C 로 말을 걸어 대답(ACK)하는지만 본다.
-     * 🚨 예전엔 체크코드 레지스터(0xD1FC)를 읽어 0x204ECACA 인지 봤는데,
-     * 돌아오는 값이 매번 달랐다(0x00200232 = x32 y562 … 좌표였다).
-     * 칩이 리포트 모드라 물은 레지스터 대신 터치 데이터를 준다. 락을 걸어도
-     * 같았으니 경쟁이 아니라 내가 프로토콜을 잘못 안 것이다. 그 값은 못 믿으니
-     * 확실한 것만 본다: 전원이 나갔거나 칩이 죽으면 ACK 자체가 없다. */
+    /* Is the touch chip alive? Just whether it acknowledges over I2C.
+     * 🚨 This used to read the check-code register (0xD1FC) and compare
+     * against 0x204ECACA, but the value came back different every time
+     * (0x00200232 = x32 y562, i.e. coordinates). The chip is in report mode
+     * and hands back touch data instead of the register asked for. Taking the
+     * lock made no difference, so it was not a race — the protocol was simply
+     * misunderstood. That value cannot be trusted, so only the certain thing
+     * is checked: with the power gone or the chip dead there is no ACK. */
     port_lock();
     tp_open();
     if (s_tp) {
         uint8_t reg[2] = { 0xD1, 0xFC };
         if (i2c_master_transmit(s_tp, reg, 2, 200) == ESP_OK) {
-            snprintf(tp, sizeof tp, s_tp_asleep ? "재우는중" : "응답함");
+            snprintf(tp, sizeof tp, s_tp_asleep ? "asleep" : "responding");
         } else if (s_tp_asleep) {
-            snprintf(tp, sizeof tp, "재우는중");     /* 자는 중엔 무응답이 정상 */
-        } else { snprintf(tp, sizeof tp, "무응답"); bad++; }
+            snprintf(tp, sizeof tp, "asleep");     /* no answer while asleep is correct */
+        } else { snprintf(tp, sizeof tp, "no answer"); bad++; }
     }
 
     port_unlock();
@@ -2410,17 +2501,17 @@ int port_health_check(char *out, size_t len)
     if (s_err_n) bad++;
 
     if (s_err_n) {
-        /* 증상(무슨 오류)과 원인(그때 자원이 어땠나)을 한 줄에 붙인다 */
+        /* Put the symptom (which error) and the cause (what the resources were) on one line */
         char *nl = strchr(s_err_first, '\n'); if (nl) *nl = 0;
-        snprintf(out, len, "오류 %lu · 터치 %s │ 첫오류 \"%s\" 그때 내부 %luKB 최대덩어리 %luKB%s%s%s",
+        snprintf(out, len, "%lu errors, touch %s | first \"%s\" with internal %luKB, largest block %luKB%s%s%s",
                  (unsigned long)s_err_n, tp, s_err_first,
                  (unsigned long)(s_err_free / 1024), (unsigned long)(s_err_big / 1024),
-                 (s_err_ctx & 1) ? " BLE연결" : "",
-                 (s_err_ctx & 2) ? " 녹음중" : "",
-                 (s_err_ctx & 4) ? " 화면꺼짐" : "");
+                 (s_err_ctx & 1) ? " BLE-connected" : "",
+                 (s_err_ctx & 2) ? " recording" : "",
+                 (s_err_ctx & 4) ? " display-off" : "");
     } else {
-        snprintf(out, len, "정상 · 경고 %lu%s · 터치 %s", (unsigned long)s_warn_n,
-                 s_err_known ? " · 무해(설명됨)" : "", tp);
+        snprintf(out, len, "ok, %lu warnings%s, touch %s", (unsigned long)s_warn_n,
+                 s_err_known ? ", harmless (explained)" : "", tp);
     }
     return bad;
 }

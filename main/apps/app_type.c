@@ -18,10 +18,9 @@ static const snip_t SNIPS[] = {
 #ifdef BADGE_SNIPPETS
     BADGE_SNIPPETS
 #else
-    /* 🚨 This label is rendered in Montserrat — Korean in it comes out broken.
-     * (The same goes for text put in through BADGE_SNIPPETS. Using Korean
-     *  means adding those characters in tools/make-kr-font.sh and swapping the
-     *  font.) */
+    /* 🚨 This label is rendered in Montserrat, which carries Latin only.
+     * Anything outside that range — in BADGE_SNIPPETS text too — comes out as
+     * tofu boxes. Using it means building a font that has those glyphs. */
     { "no snippets", "" },
 #endif
 };

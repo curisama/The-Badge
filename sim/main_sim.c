@@ -494,7 +494,7 @@ int main(int argc, char **argv)
     struct { const badge_app_t *app; const char *shot; } scenes[] = {
         { &app_mouse, "02_mouse" },
         { &app_clock, "04_clock" },
-        { &app_meet,  "05_meet" },   /* the only screen with Korean on it — for checking the font */
+        { &app_meet,  "05_meet" },
         { &app_settings, "06_settings" },
         { &app_keys, "08_keys" },
         { &app_calc, "09_calc" },

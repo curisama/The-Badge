@@ -55,7 +55,6 @@ idf.py -p /dev/ttyACM0 flash monitor       # COMx on Windows
 ./tools/regress.sh              # have any of the 16 past faults come back (source only)
 python3 tools/sim-exit-check.py # does any board die on the way home
 python3 tools/sim-stress.py     # a shaken clock and rough handling
-./tools/check-glyphs.sh         # does any character the font lacks reach the screen
 ```
 
 With a badge to hand, these too:

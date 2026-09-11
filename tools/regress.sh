@@ -395,6 +395,13 @@ EOF
 echo "════ does a long press survive the screen being rebuilt ════"
 python3 tools/sim-hold-check.py && ok "a long press still lands during a rebuild" || bad "the long press dies (deleting the pressed object makes LVGL ignore input until release)"
 
+echo "════ do the home pages still turn ════"
+# 🚨 A gesture reaches only the pressed object. On 09-11 swapping the wallpaper
+#    for an lv_obj_create() — clickable by default, unlike the image it replaced —
+#    made the wallpaper swallow every swipe on the bare background and the pages
+#    stopped turning. Nothing about the source looks wrong, so it is swiped for real.
+python3 tools/sim-swipe-check.py >/dev/null 2>&1 && ok "swiping left and right turns the home pages" || bad "the home pages do not turn (something on home is eating the gesture)"
+
 echo "════ do large arrays hold internal RAM permanently ════"
 if [ ! -f build/badge_fw.map ]; then
   echo "  · not built yet — skipped (try again after idf.py build)"

@@ -543,6 +543,11 @@ static void build_home(void)
     lv_obj_t *wall = lv_obj_create(s_home);
     lv_obj_remove_style_all(wall);
     lv_obj_remove_flag(wall, LV_OBJ_FLAG_SCROLLABLE);
+    /* 🚨 lv_obj_create() is clickable by default, unlike the image this used to
+     * be. Left that way the wallpaper is the pressed object for every swipe on
+     * the bare background, the screen never sees the gesture, and the page
+     * stops turning. */
+    lv_obj_remove_flag(wall, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_size(wall, 466, 466);
     lv_obj_center(wall);
     lv_obj_set_style_radius(wall, LV_RADIUS_CIRCLE, 0);
@@ -655,13 +660,11 @@ static bool      s_closing;
  * whole surface (the mouse trackpad) it only acts **when the finger started
  * on the handle**. A drag through the middle that happens to pass over it is
  * not seen. */
-#define HANDLE_W    104
-#define HANDLE_H    6
-#define HANDLE_Y    (-10)   /* nearly at the bottom edge */
 #define SWIPE_UP    45      /* lift it this far and you are out */
 /* 🚨 The grab area is defined in exactly one place. When an app handles the
  * handle gesture itself (launcher_handle_zone), a second definition means
- * what you see and what responds are in different places. */
+ * what you see and what responds are in different places. The visible arc is a
+ * separate, deliberately thinner thing — its size is set where it is built. */
 #define HANDLE_W    240
 #define HANDLE_H    64
 

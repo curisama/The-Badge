@@ -1,7 +1,9 @@
-"""아주 작은 WebSocket 구현 (RFC6455). 외부 패키지 없이 쓰려고 직접 넣었다.
+"""A very small WebSocket implementation (RFC6455), written out here so that no
+outside package is needed.
 
-필요한 것만 있다: 핸드셰이크, 텍스트/바이너리 프레임 읽고 쓰기, 마스킹 해제.
-조각난 프레임(continuation)과 확장은 안 쓴다 — 우리가 보내는 건 우리가 만든다."""
+Only what is needed: the handshake, reading and writing text and binary frames,
+unmasking. Fragmented frames (continuation) and extensions are not used — we
+make everything we send."""
 import base64, hashlib, os, select, struct
 
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -24,7 +26,7 @@ def handshake(handler):
 
 
 def send(sock, payload, opcode=0x2):
-    """opcode 0x1=텍스트 0x2=바이너리 0x8=닫기"""
+    """opcode 0x1=text 0x2=binary 0x8=close"""
     n = len(payload)
     if n < 126:
         head = struct.pack("!BB", 0x80 | opcode, n)
@@ -46,7 +48,7 @@ def _recv_exact(sock, n):
 
 
 def recv(sock):
-    """프레임 하나. 닫기면 None."""
+    """One frame. None on close."""
     head = _recv_exact(sock, 2)
     if not head:
         return None

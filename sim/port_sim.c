@@ -1,4 +1,4 @@
-/* PC 시뮬레이터용 port 구현. 실기 코드는 건드리지 않는다. */
+/* The port implementation for the PC simulator. The hardware code is left alone. */
 #include "display.h"
 #include "port.h"
 #include <stdio.h>
@@ -12,14 +12,14 @@ void port_log(const char *tag, const char *fmt, ...)
 {
     va_list ap;
     va_start(ap, fmt);
-    /* stdout 은 프레임 파이프 전용이다. 로그는 stderr 로 보낸다. */
+    /* stdout is the frame pipe and nothing else. Logs go to stderr. */
     fprintf(stderr, "[%s] ", tag);
     vfprintf(stderr, fmt, ap);
     fprintf(stderr, "\n");
     va_end(ap);
 }
 
-/* NVS 대신 파일. 시뮬 재실행 사이에도 다마고치 상태가 남는다. */
+/* A file instead of NVS. The Tamagotchi state survives between simulator runs. */
 static void kv_path(const char *key, char *out, size_t n)
 {
     snprintf(out, n, "/tmp/badge_kv_%s.bin", key);
@@ -49,8 +49,8 @@ void port_kv_write(const char *key, const void *in, size_t len)
 void port_home_button_start(void (*on_press)(void)) { (void)on_press; }
 void port_radio_set(int need) { fprintf(stderr, "[radio] need=%d\n", need); }
 
-/* ── 에뮬레이터 지원 (가상 시계) ──────────────────────────────
- * 실제로 기다리지 않는다. 시간을 밀어버리면 에뮬이 최고 속도로 돈다. */
+/* ── emulator support (the virtual clock) ─────────────────────
+ * It does not really wait. Pushing time forward runs the emulator flat out. */
 #include <stdlib.h>
 
 uint32_t g_sim_us;
@@ -61,28 +61,29 @@ void    *port_big_alloc(size_t n) { return malloc(n); }
 
 void port_task_start(const char *name, void (*fn)(void *), void *arg, int stack)
 {
-    (void)name; (void)fn; (void)arg; (void)stack;   /* 시뮬은 호출측이 직접 돌린다 */
+    (void)name; (void)fn; (void)arg; (void)stack;   /* in the simulator the caller drives it directly */
 }
 
-/* 시뮬은 소리를 못 낸다. 몇 Hz가 언제 울렸는지만 남긴다. */
+/* The simulator cannot make a sound. It only records what frequency sounded when. */
 static uint32_t g_tone_hz;
 void port_tone_init(void) {}
 void port_tone_freq(uint32_t hz) { g_tone_hz = hz; }
 void port_tone_enable(bool on) { if (on) fprintf(stderr, "[tone] %u Hz\n", g_tone_hz); }
 void port_tone_volume(int percent) { (void)percent; }
 
-/* 시뮬은 코덱이 없으니 붙잡을 것도 없다 */
+/* The simulator has no codec, so there is nothing to hold */
 void port_tone_hold(bool on) { (void)on; }
 void port_boot_btn_fake(uint32_t ms) { (void)ms; }
 uint32_t port_boot_isr_count(void) { return 0; }
 bool port_tone_codec_open(void) { return false; }
 int  port_hid_forget_all(void) { return 0; }
-/* 시뮬엔 IMU 가 없다. 손가락으로 만든 가짜 값만 쓴다. */
-/* ── 가짜 IMU ────────────────────────────────────────────────
- * 🚨 시뮬에 IMU 가 없어서 기울기로 도는 것(구슬·브릭 기울기판·물 중력·
- * 에어마우스)이 통째로 시험 밖에 있었다. 실기에서만 터지는 버그가 이쪽에
- * 몰린 이유다(0909). 밖에서 값을 넣을 수 있게 두고, 안 넣으면 예전처럼
- * "IMU 없음" 으로 답한다 — 없는 기기도 그대로 흉내낼 수 있어야 하니까. */
+/* The simulator has no IMU. Only fake values, made with a finger. */
+/* ── the fake IMU ────────────────────────────────────────────
+ * 🚨 With no IMU in the simulator, everything driven by tilt (marble, the
+ * brick tilt board, water gravity, the air mouse) sat outside every test.
+ * That is why the bugs that only showed on the hardware clustered there
+ * (09-09). Values can be pushed in from outside, and with nothing pushed it
+ * answers "no IMU" as before — a device without one has to be imitable too. */
 static float g_imu_x, g_imu_y, g_imu_z = 1000.0f;
 static bool  g_imu_on;
 
@@ -90,8 +91,9 @@ void sim_imu_set(float x, float y, float z)
 { g_imu_x = x; g_imu_y = y; g_imu_z = z; g_imu_on = true; }
 void sim_imu_off(void) { g_imu_on = false; }
 
-/* 자이로도 같은 방식으로 밖에서 넣는다. 안 넣으면 "자이로 없음" 이라
- * 에어마우스가 기울기로 되돌아간다 — 그 갈림길까지 시뮬에서 밟아본다. */
+/* The gyro is pushed in from outside the same way. With nothing pushed it says
+ * "no gyro" and the air mouse falls back to tilt — that fork gets walked in the
+ * simulator too. */
 static float g_gyr_x, g_gyr_y, g_gyr_z;
 static bool  g_gyr_have, g_gyr_on;
 
@@ -124,24 +126,25 @@ void port_brightness_set(int percent) { g_bright = percent; }
 int  port_brightness_get(void) { return g_bright; }
 
 static net_state_t g_net = NET_IDLE;
-void        port_time_sync_start(void) { g_net = NET_SYNCED; }   /* 시뮬은 PC 시계를 쓴다 */
+void        port_time_sync_start(void) { g_net = NET_SYNCED; }   /* the simulator uses the PC clock */
 net_state_t port_time_sync_state(void) { return g_net; }
 const char *port_bt_status(void) { return "off"; }
 
-/* ── BLE HID 시뮬 스텁 ────────────────────────────────────────
- * 실제로 보내는 데는 없지만 리포트를 찍어서 제스처 논리는 확인할 수 있다. */
+/* ── the BLE HID simulator stubs ──────────────────────────────
+ * There is nowhere to really send, but printing the reports is enough to check
+ * the gesture logic. */
 static bool g_hid_on;
 static int  g_hid_frames;
 
-void port_hid_start(void) { g_hid_on = true;  g_hid_frames = 0; fprintf(stderr, "[hid] 광고 시작\n"); }
+void port_hid_start(void) { g_hid_on = true;  g_hid_frames = 0; fprintf(stderr, "[hid] advertising\n"); }
 void port_hid_stop(void)  { g_hid_on = false; }
-bool port_hid_connected(void) { return g_hid_on && ++g_hid_frames > 3; }  /* 잠깐 뒤 붙은 척 */
+bool port_hid_connected(void) { return g_hid_on && ++g_hid_frames > 3; }  /* pretends to connect a moment later */
 const char *port_hid_peer(void) { return port_hid_connected() ? "sim host" : "advertising"; }
 
-/* 시뮬엔 상대가 없다. 감도는 기기별로 못 나누고 기본값 하나로 돈다. */
+/* The simulator has no peer. Sensitivity cannot be per-device and runs off one default. */
 bool port_hid_peer_addr(uint8_t out[6]) { (void)out; return false; }
 
-/* 시뮬엔 본딩이 없다. 화면을 눌러보려면 목록이 있어야 하므로 가짜로 준다. */
+/* The simulator has no bonds. The screen needs a list to press, so a fake one is handed over. */
 static char s_hostnm[3][17] = { "", "", "" };
 int port_hid_hosts(hid_host_t *out, int max)
 {
@@ -172,9 +175,9 @@ void port_hid_host_name_set(const uint8_t addr[6], const char *name)
 void port_hid_host_pick(const uint8_t addr[6]) { (void)addr; }
 void port_hid_host_any(void) { }
 
-/* 시뮬엔 라디오가 없다. 화면을 눌러보려면 결과가 있어야 하므로 가짜로 준다.
- * 🚨 실기와 같은 시차(1초)를 둔다 — 곧바로 답하면 "훑는 중" 화면을 영영
- * 못 보고, 그 화면이 깨져 있어도 모른다. */
+/* The simulator has no radio. The screen needs results to press, so fake ones are handed over.
+ * 🚨 The same delay as the hardware (one second) — answering instantly would
+ * never show the "scanning" screen, and a broken one would go unnoticed. */
 static uint32_t s_scan_t0;
 static bool     s_scan_on;
 void port_wifi_scan_start(void) { s_scan_on = true; s_scan_t0 = lv_tick_get(); }
@@ -210,7 +213,7 @@ int port_wifi_try_state(void)
 {
     if (!s_try_on) return WIFI_TRY_FAIL;
     if (lv_tick_get() - s_try_t0 < 1500) return WIFI_TRY_BUSY;
-    /* 시뮬에선 sim- 으로 시작하는 것만 붙는 척한다 — 실패 화면도 봐야 한다. */
+    /* In the simulator only names starting with sim- pretend to join — the failure screen has to be seen too. */
     bool ok = strncmp(s_try, "sim-", 4) == 0;
     if (ok) snprintf(s_last_ok, sizeof s_last_ok, "%s", s_try);
     return ok ? WIFI_TRY_OK : WIFI_TRY_FAIL;
@@ -262,24 +265,24 @@ void port_hid_mouse(int dx, int dy, unsigned buttons, int wheel)
         fprintf(stderr, "[hid] dx=%d dy=%d btn=%u wheel=%d\n", dx, dy, buttons, wheel);
 }
 
-/* 시뮬은 브라우저가 세어준 손가락 수를 그대로 받는다 (N 명령) */
+/* The simulator takes the finger count the browser counted (the N command) */
 int g_touch_count = 1;
 int port_touch_count(void) { return g_touch_count; }
 
-/* 시뮬은 검은 덮개로만 표현한다 — 실기에선 화소가 진짜 꺼진다 */
+/* The simulator shows it only as a black cover — on the hardware the pixels really go out */
 void port_display_power(bool on) { (void)on; }
 
-int port_pwr_key(void) { return 0; }   /* 시뮬은 W 명령으로 직접 토글한다 */
+int port_pwr_key(void) { return 0; }   /* the simulator toggles directly with the W command */
 
 uint32_t port_hid_passkey(void) { return 0; }
 
-void port_rtc_restore(void) {}   /* 시뮬은 PC 시계를 쓴다 */
+void port_rtc_restore(void) {}   /* the simulator uses the PC clock */
 void port_time_autosync(void) {}
 static int g_tz = 9 * 60;
 void port_set_tz_offset(int m) { g_tz = m; }
 int  port_get_tz_offset(void) { return g_tz; }
 
-bool port_imu_angle(float *deg) { (void)deg; return false; }   /* 시뮬엔 센서가 없다 */
+bool port_imu_angle(float *deg) { (void)deg; return false; }   /* the simulator has no sensor */
 bool port_imu_upright(void) { return false; }
 bool port_imu_accel(float *x, float *y)
 {
@@ -287,33 +290,34 @@ bool port_imu_accel(float *x, float *y)
     return port_imu_accel3(x, y, &z);
 }
 
-int  port_battery_percent(void) { return 76; }   /* 시뮬은 그럴듯한 값 */
+int  port_battery_percent(void) { return 76; }   /* a plausible value for the simulator */
 bool port_battery_charging(void) { return false; }
 bool port_battery_plugged(void) { return false; }
 int  port_battery_minutes_left(void) { return 5 * 60 + 20; }
 
-void port_power_off(void) { fprintf(stderr, "[axp] 전원 차단\n"); }
+void port_power_off(void) { fprintf(stderr, "[axp] power cut\n"); }
 
-void port_heap_report(const char *when) { (void)when; }   /* 시뮬은 힙이 넉넉하다 */
+void port_heap_report(const char *when) { (void)when; }   /* the simulator has heap to spare */
 
 
-/* ── 회의 버튼 (시뮬) ──────────────────────────────────────
- * 시뮬엔 폰이 없으니 가짜 폰을 하나 둔다. 명령을 받으면 잠시 뒤 회신을
- * 돌려줘서 화면 흐름을 실기와 같은 순서로 볼 수 있게 한다. */
-static uint32_t s_meet_due;    /* 회신 예정 시각(us). 0 = 없음 */
+/* ── the meeting button (simulator) ────────────────────────
+ * The simulator has no phone, so it keeps a fake one. It answers a command a
+ * moment later so the screen flow can be watched in the same order as on the
+ * hardware. */
+static uint32_t s_meet_due;    /* when the reply is due (us). 0 = none */
 static uint8_t  s_meet_next;
 
 bool port_meet_link(void) { return true; }
 
 bool port_meet_send(uint8_t cmd)
 {
-    port_log("meet", "명령 0x%02X (가짜 폰)", cmd);
+    port_log("meet", "command 0x%02X (fake phone)", cmd);
     if (cmd == MEET_CMD_START_KO || cmd == MEET_CMD_START_EN) {
         s_meet_next = MEET_ACK_STARTED;
-        s_meet_due  = port_micros() + 600000;      /* 0.6초 뒤 "마이크 열었다" */
+        s_meet_due  = port_micros() + 600000;      /* "microphone open" 0.6 s later */
     } else if (cmd == MEET_CMD_STOP) {
         s_meet_next = MEET_ACK_SAVED;
-        s_meet_due  = port_micros() + 4000000;     /* 4초 뒤 "회의록 저장됨" */
+        s_meet_due  = port_micros() + 4000000;     /* "minutes saved" 4 s later */
     }
     return true;
 }
@@ -333,8 +337,9 @@ void port_battery_log(const char *what) { (void)what; }
 void port_battery_mark(bool on) { (void)on; }
 
 
-/* ── 녹음 (시뮬) ──────────────────────────────────────────
- * 시뮬엔 마이크도 플래시도 없다. 화면 흐름만 볼 수 있게 시늉만 낸다. */
+/* ── recording (simulator) ────────────────────────────────
+ * The simulator has neither microphone nor flash. It only goes through the
+ * motions so the screen flow can be seen. */
 static uint32_t s_rec_t0;
 static bool     s_rec_on;
 static int      s_rec_pend;
@@ -342,7 +347,7 @@ static int      s_rec_pend;
 bool port_rec_start(int lang)
 {
     (void)lang;
-    port_log("rec", "녹음 시작 (시뮬)");
+    port_log("rec", "recording started (simulator)");
     s_rec_t0 = port_micros();
     s_rec_on = true;
     return true;
@@ -356,7 +361,7 @@ void     port_rec_upload_try(void)   { s_rec_pend = 0; }
 bool     port_rec_uploading(void)    { return false; }
 const char *port_rec_upload_msg(void){ return ""; }
 
-/* 시뮬엔 BLE 가 없다. 폰이 흔히 주는 값을 흉내낸다. */
+/* The simulator has no BLE. It imitates what a phone usually gives. */
 int port_hid_interval_ms(void) { return 15; }
 
 void port_big_free(void *p) { free(p); }
@@ -372,12 +377,12 @@ void port_crumb(int what) { s_crumb_sim = what; }
 int  port_crumb_now(void) { return s_crumb_sim; }
 void port_uptime_mark(void) {}
 
-/* 시뮬엔 패널이 없다. 설정 화면이 돌아가게만 흉내낸다. */
+/* The simulator has no panel. It imitates just enough for the settings screen to work. */
 static int s_sim_xgap = 6;
 void badge_display_set_xgap(int g) { s_sim_xgap = g; }
 int  badge_display_get_xgap(void)  { return s_sim_xgap; }
 
-/* 시뮬은 LVGL 입력장치를 자기가 만든다. 런처가 절전용으로 물어볼 때 쓴다. */
+/* The simulator makes its own LVGL input device. Used when the launcher asks, for power saving. */
 lv_indev_t *badge_display_indev(void) { return lv_indev_get_next(NULL); }
 
 void port_cpu_mark(void) {}
@@ -389,10 +394,11 @@ void port_health_begin(void) {}
 int  port_health_check(char *o, size_t n) { if (n) o[0] = 0; return 0; }
 uint32_t port_health_errors(void) { return 0; }
 
-/* ── USB 내보내기 흉내 ──────────────────────────────────────
- * 🚨 시뮬엔 USB 가 없다. 화면 흐름(꺼짐 → 기다림 → 붙음 → 뺐음)만 볼 수
- * 있게 가짜로 돌린다. 판을 짓는 쪽(usb_export.c)은 녹음 파티션을 읽으므로
- * 시뮬에 넣지 않는다 — 여기서 개수를 지어낸다. */
+/* ── pretending to export over USB ──────────────────────────
+ * 🚨 The simulator has no USB. It fakes the flow (off → waiting → attached →
+ * ejected) so the screens can be seen. The side that builds the volume
+ * (usb_export.c) reads the recording partition and is left out of the
+ * simulator — the count is made up here. */
 #include "usb_export.h"
 
 static bool s_usb_on, s_usb_ej;

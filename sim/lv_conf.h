@@ -40,19 +40,21 @@
  * - LV_STDLIB_RTTHREAD:    RT-Thread implementation
  * - LV_STDLIB_CUSTOM:      Implement the functions externally
  */
-/* 🚨 예전엔 호스트의 무한한 malloc 을 썼다. 그러면 시뮬에서 메모리는
- * 절대 안 모자라고, "이 화면이 실기에 안 들어간다"를 굽고 나서야 안다.
- * 실기와 같은 방식(고정 풀)으로 바꾸고, 크기도 실기 실측값에서 가져온다.
+/* 🚨 It used to use the host's unlimited malloc. That way the simulator never
+ * runs short of memory, and "this screen does not fit on the hardware" is only
+ * learned after flashing. It now works the same way as the hardware (a fixed
+ * pool), with the size taken from what was measured there.
  *
- * 실기 내부 RAM 실측(0908~0909):
- *     부팅 직후 여유            116KB
- *     - LVGL 그리기 버퍼 16줄x2  29KB  (풀 밖, 따로 잡힌다)
- *     = LVGL 객체가 쓸 수 있는 몫  약 87KB
- *     BLE 를 켜면 여기서 74KB 가 더 빠진다 → 약 13KB
+ * Internal RAM measured on the hardware (09-08 to 09-09):
+ *     free right after boot            116 KB
+ *     - LVGL draw buffers, 16 rows x2   29 KB  (outside the pool, allocated separately)
+ *     = what LVGL objects can use      about 87 KB
+ *     Turning BLE on takes another 74 KB of that → about 13 KB
  *
- * 그냥 116KB 를 주면 실기보다 헐거워서 통과해도 소용이 없다.
- * 기본은 87KB(평소), BADGE_SIM_TIGHT 를 주면 13KB(마우스·키보드 켠 상태).
- * 후자로 통과해야 BLE 앱에서 안 죽는다. */
+ * Simply handing over 116 KB is looser than the hardware, so passing there
+ * proves nothing. The default is 87 KB (normal); BADGE_SIM_TIGHT gives 13 KB
+ * (mouse or keyboard on). Passing with the latter is what keeps the BLE apps
+ * from dying. */
 #define LV_USE_STDLIB_MALLOC    LV_STDLIB_BUILTIN
 
 /** Possible values
@@ -83,9 +85,9 @@
 #if LV_USE_STDLIB_MALLOC == LV_STDLIB_BUILTIN
     /** Size of memory available for `lv_malloc()` in bytes (>= 2kB) */
     #ifdef BADGE_SIM_TIGHT
-        #define LV_MEM_SIZE (13 * 1024U)      /* BLE 켠 상태의 실기 여유 */
+        #define LV_MEM_SIZE (13 * 1024U)      /* hardware headroom with BLE on */
     #else
-        #define LV_MEM_SIZE (87 * 1024U)      /* 평소 실기 여유 */
+        #define LV_MEM_SIZE (87 * 1024U)      /* normal hardware headroom */
     #endif
 
     /** Size of the memory expand for `lv_malloc()` in bytes */

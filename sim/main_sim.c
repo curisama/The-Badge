@@ -1,7 +1,7 @@
-/* LVGL 시뮬레이터.
- *   --shots        스크린샷 몇 장 찍고 끝 (기본)
- *   --serve        stdin 명령을 받아 프레임을 stdout 으로 뱉는 대화형 모드
- * 실기와 같은 UI 코드를 PC에서 돌린다. */
+/* The LVGL simulator.
+ *   --shots        take a few screenshots and stop (the default)
+ *   --serve        interactive: take commands on stdin, spit frames to stdout
+ * It runs the same UI code as the hardware, on a PC. */
 #include "app.h"
 #include "port.h"
 #include <stdio.h>
@@ -9,8 +9,9 @@
 #include <stdlib.h>
 #include <unistd.h>
 #ifdef _WIN32
-/* 🚨 윈도우 stdio 는 기본이 글자 모드다. 프레임 안의 0x0A 가 0x0D0A 로 불어나
- * 화면 데이터가 조용히 망가진다 — 파이프를 날것 모드로 돌려놔야 한다. */
+/* 🚨 Windows stdio is in text mode by default. A 0x0A inside a frame swells to
+ * 0x0D0A and quietly corrupts the screen data — the pipe has to be put into
+ * raw mode. */
 #include <fcntl.h>
 #include <io.h>
 #include <direct.h>
@@ -25,24 +26,25 @@
 
 static uint16_t s_fb[W * H];
 
-extern uint32_t g_sim_us;                     /* port_sim.c 의 가상 시계 */
+extern uint32_t g_sim_us;                     /* the virtual clock in port_sim.c */
 static uint32_t tick_cb(void) { return g_sim_us / 1000; }
 
 
-/* ── 화면 ────────────────────────────────────────────────────── */
+/* ── the screen ──────────────────────────────────────────────── */
 
-/* ── 그리기 양 계측 ──────────────────────────────────────────
- * 🚨 이 화면은 QSPI 40MHz x 4선 = 초당 20MB 가 천장이다. 한 프레임을
- * 통째로 밀면 466x466x2 = 434KB 라 21.7ms, 이론상 46fps 다.
- * 실기에서 잰 값(전체 화면급 부하에서 20ms 타이머가 58ms 로 밀렸다)을
- * 생각하면 실제 천장은 그보다 낮다.
+/* ── measuring how much is drawn ─────────────────────────────
+ * 🚨 This screen's ceiling is QSPI at 40 MHz over 4 lines = 20 MB a second.
+ * Pushing a whole frame is 466x466x2 = 434 KB, so 21.7 ms, in theory 46 fps.
+ * Measured on the hardware (a 20 ms timer slipping to 58 ms under full-screen
+ * load), the real ceiling is lower than that.
  *
- * 시뮬은 무한히 빠른 PC 라 "되는 것처럼" 보인다 — 그래서 굽고 나서야
- * 안 되는 걸 안다. 여기서 바이트를 세어 예산을 넘는지 미리 알려준다. */
+ * The simulator is an infinitely fast PC, so everything "looks fine" — and the
+ * problem only turns up after flashing. Counting the bytes here says in
+ * advance whether the budget is blown. */
 #define QSPI_BYTES_PER_SEC  (20u * 1000u * 1000u)
-static uint64_t g_draw_bytes;      /* 지금까지 민 총 바이트 */
+static uint64_t g_draw_bytes;      /* total bytes pushed so far */
 static uint32_t g_draw_calls;
-static uint64_t g_win_bytes;       /* 측정 창 안에서 민 바이트 */
+static uint64_t g_win_bytes;       /* bytes pushed inside the measuring window */
 static uint32_t g_win_start_ms;
 static uint32_t g_win_frames;
 
@@ -61,11 +63,11 @@ static void flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
     lv_display_flush_ready(disp);
 }
 
-/* ── 터치 ────────────────────────────────────────────────────── */
+/* ── touch ───────────────────────────────────────────────────── */
 
 static int32_t s_touch_x, s_touch_y;
 static bool    s_touch_down;
-static bool    s_pending_press;   /* 눌렀다 바로 뗀 탭을 놓치지 않기 위한 자국 */
+static bool    s_pending_press;   /* a mark so a press-and-release tap is not missed */
 
 static void indev_cb(lv_indev_t *indev, lv_indev_data_t *data)
 {
@@ -74,20 +76,20 @@ static void indev_cb(lv_indev_t *indev, lv_indev_data_t *data)
     data->point.y = s_touch_y;
 
     bool pressed = s_touch_down || s_pending_press;
-    if (s_pending_press && !s_touch_down) s_pending_press = false;  /* 한 번 보고하면 소진 */
+    if (s_pending_press && !s_touch_down) s_pending_press = false;  /* spent once reported */
     data->state = pressed ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
 }
 
-/* ── 시간 진행 ───────────────────────────────────────────────── */
+/* ── advancing time ──────────────────────────────────────────── */
 
-/* 다마고치가 떠 있으면 에뮬 CPU가 시계를 민다. 아니면 우리가 민다. */
-/* ── 시계 흔들기 ─────────────────────────────────────────────
- * 🚨 시뮬은 시간이 자로 잰 듯 고르게 흐른다. 실기는 안 그렇다 —
- * 0908 실측에서 20ms 타이머가 게임 중엔 20ms 였지만 화면이 바쁠 땐
- * 평균 57ms, 최대 251ms 로 밀렸다. 브레이크아웃 공이 들쭉날쭉했던 게
- * 그것 때문이었는데, 시뮬에선 고르게 흘러서 끝까지 안 보였다.
- * 흔들어 놓으면 그런 버그가 시뮬에서 드러난다. 'J n' 으로 켠다. */
-static uint32_t g_jitter_max;      /* 0 = 안 흔든다 */
+/* With Tamagotchi up, the emulated CPU drives the clock. Otherwise we do. */
+/* ── shaking the clock ───────────────────────────────────────
+ * 🚨 In the simulator time flows as evenly as a ruler. On the hardware it does
+ * not — measured 09-08, a 20 ms timer was 20 ms during a game but averaged
+ * 57 ms and peaked at 251 ms when the screen was busy. That is what made the
+ * breakout ball jerky, and the even flow in the simulator hid it all the way
+ * through. Shaking the clock brings bugs like that out here. Turn it on with 'J n'. */
+static uint32_t g_jitter_max;      /* 0 = no shaking */
 static uint32_t g_jit_seed = 2463534242u;
 
 static uint32_t jit_rnd(void)
@@ -104,7 +106,7 @@ static void advance(uint32_t us)
     for (uint32_t done = 0; done < us; ) {
         uint32_t chunk = BASE;
         if (g_jitter_max) {
-            /* 대개는 짧게, 이따금 크게 — 실기의 "가끔 확 밀림"을 흉내낸다 */
+            /* Mostly small, occasionally large — imitating the hardware's "sudden big slip" */
             uint32_t r = jit_rnd() % 100;
             chunk = (r < 80) ? BASE
                   : (r < 97) ? BASE * 4
@@ -117,13 +119,14 @@ static void advance(uint32_t us)
     }
 }
 
-/* ── PNG 저장 (스크린샷 모드) ────────────────────────────────── */
+/* ── saving a PNG (screenshot mode) ─────────────────────────── */
 
-/* 🚨 예전엔 /tmp 에 PPM 을 쓰고 `mkdir -p shots && pnmtopng` 를 불렀다.
- * 윈도우엔 셋 다 없다 — /tmp 도, netpbm 도, `mkdir -p` 를 아는 셸도. 그래서
- * 스크린샷이 죄다 0바이트로 나왔는데 프로그램은 성공했다며 끝났다(0909).
- * 이제 밖을 아무것도 안 부르고 직접 쓴다. 눌러 담지 않아 한 장에 650KB 쯤
- * 되지만 sim/shots 는 깃에 안 올라가니 상관없다. */
+/* 🚨 It used to write a PPM to /tmp and call `mkdir -p shots && pnmtopng`.
+ * Windows has none of the three — no /tmp, no netpbm, no shell that knows
+ * `mkdir -p`. So every screenshot came out 0 bytes while the program reported
+ * success (09-09). Now it calls nothing outside and writes them itself. There
+ * is no compression, so a shot is around 650 KB, but sim/shots is not in git
+ * and it does not matter. */
 
 static uint32_t s_crc_tab[256];
 static int s_crc_ready;
@@ -167,7 +170,7 @@ static void write_png(const char *name, int mask_corners)
     BADGE_MKDIR("shots");
     snprintf(png, sizeof(png), "shots/%s.png", name);
 
-    /* PNG 는 줄마다 앞에 거르개 종류 한 바이트가 붙는다(0 = 안 쓴다). */
+    /* A PNG puts one filter-type byte in front of every row (0 = none). */
     const size_t stride = 1 + (size_t)W * 3;
     const size_t raw_n = stride * (size_t)H;
     uint8_t *raw = (uint8_t *)malloc(raw_n);
@@ -188,7 +191,7 @@ static void write_png(const char *name, int mask_corners)
         }
     }
 
-    /* zlib 껍데기 + "안 눌러 담은" 블록들. 블록 하나에 65535바이트까지. */
+    /* The zlib wrapper plus "stored" blocks. One block holds up to 65535 bytes. */
     const size_t blocks = (raw_n + 65534) / 65535;
     uint8_t *z = (uint8_t *)malloc(2 + blocks * 5 + raw_n + 4);
     if (!z) { free(raw); return; }
@@ -196,7 +199,7 @@ static void write_png(const char *name, int mask_corners)
     z[zi++] = 0x78; z[zi++] = 0x01;
     for (size_t off = 0; off < raw_n; off += 65535) {
         size_t n = (raw_n - off < 65535) ? raw_n - off : 65535;
-        z[zi++] = (off + n >= raw_n) ? 1 : 0;              /* 마지막 블록 표시 */
+        z[zi++] = (off + n >= raw_n) ? 1 : 0;              /* marks the final block */
         z[zi++] = (uint8_t)(n & 0xFF);
         z[zi++] = (uint8_t)(n >> 8);
         z[zi++] = (uint8_t)(~n & 0xFF);
@@ -216,7 +219,7 @@ static void write_png(const char *name, int mask_corners)
     uint8_t ihdr[13];
     put_be32(ihdr, (uint32_t)W);
     put_be32(ihdr + 4, (uint32_t)H);
-    ihdr[8] = 8;                       /* 한 칸 8비트 */
+    ihdr[8] = 8;                       /* 8 bits a channel */
     ihdr[9] = 2;                       /* RGB */
     ihdr[10] = ihdr[11] = ihdr[12] = 0;
     png_chunk(f, "IHDR", ihdr, sizeof(ihdr));
@@ -224,19 +227,19 @@ static void write_png(const char *name, int mask_corners)
     png_chunk(f, "IEND", NULL, 0);
     fclose(f);
     free(raw); free(z);
-    fprintf(stderr, "찍음: %s\n", png);
+    fprintf(stderr, "shot: %s\n", png);
 }
 
-/* ── 대화형 모드 ─────────────────────────────────────────────
- * 한 줄 명령을 받는다:
- *   T <x> <y> <0|1>   터치
- *   H                 홈 버튼 (BOOT)
- *   N <n>             지금 닿아 있는 손가락 수
- *   W                 PWR 짧게 누름 (화면 토글)
- *   P <ms>            그 시간만큼 진행
- *   F                 프레임 요청 → "FRAME <바이트수>\n" + RGB888 원본
- *   R                 프레임 요청 → "FRAME <바이트수>\n" + RGB565 원본 (절반 크기)
- *   Q                 종료 */
+/* ── interactive mode ────────────────────────────────────────
+ * It takes one command per line:
+ *   T <x> <y> <0|1>   touch
+ *   H                 home button (BOOT)
+ *   N <n>             how many fingers are down right now
+ *   W                 short PWR press (toggles the screen)
+ *   P <ms>            advance by that much
+ *   F                 ask for a frame → "FRAME <bytes>\n" + raw RGB888
+ *   R                 ask for a frame → "FRAME <bytes>\n" + raw RGB565 (half the size)
+ *   Q                 quit */
 static void serve_loop(void)
 {
     char line[128];
@@ -252,28 +255,30 @@ static void serve_loop(void)
             if (sscanf(line + 1, "%d %d %d", &x, &y, &s) == 3) {
                 s_touch_x = x; s_touch_y = y; s_touch_down = s;
                 if (s) s_pending_press = true;
-                /* 여기서 시간을 밀지 않는다. 밀면 이벤트 하나마다 20ms 씩
-                 * 가상 시계가 튀어서, 손가락 한 번 끌 때 시계가 몇 초씩 앞서간다. */
+                /* Time is not advanced here. Advancing would jump the virtual
+                 * clock 20 ms per event, so one finger drag would run it
+                 * seconds ahead. */
             }
             break;
         }
-        /* 홈으로 곧장. 'H'(launcher_home) 는 잠금화면에선 홈으로 안 간다 —
-         * 쪽 넘기기 같은 걸 시험하려면 확실한 문이 필요하다. */
+        /* Straight home. 'H' (launcher_home) does not go home from the lock
+         * screen — trying things like page turns needs a door that always works. */
         case 'G':
             launcher_show_home();
             break;
         case 'H':
             launcher_home();
             break;
-        /* 앱을 번호로 바로 연다. 터치 좌표를 몰라도 검증을 돌릴 수 있다. */
-        /* 자동 꺼짐 시간을 바꾼다(0 = 안 꺼짐). 시간을 성큼 미는 검증에 필요하다. */
+        /* Opens an app by number. Checks can run without knowing touch coordinates. */
+        /* Changes the auto-off time (0 = never). Needed by checks that jump time forward. */
         case 'K':
             launcher_set_timeout(atoi(line + 1));
             break;
-        /* 공 좌표를 그대로 뱉는다. 속도가 균일한지 재려면 필요하다. */
-        /* 그리기 예산 — 'D 0' 재기 시작, 'D 1' 결과. 초당 몇 MB 를 밀었고
-         * 그게 QSPI 천장(20MB/s)의 몇 %인지, 그 속도로 몇 fps 가 되는지 준다. */
-        /* 시계를 흔든다. 'J 0' 끔, 'J 250' = 이따금 250ms 까지 밀림 */
+        /* Spits the ball coordinates out as they are. Needed to measure whether the speed is even. */
+        /* The drawing budget — 'D 0' starts measuring, 'D 1' gives the result: how
+         * many MB a second were pushed, what percentage of the QSPI ceiling
+         * (20 MB/s) that is, and what fps it comes to. */
+        /* Shakes the clock. 'J 0' off, 'J 250' = occasional slips up to 250 ms */
         case 'J':
             g_jitter_max = (uint32_t)atoi(line + 1);
             printf("JITTER %u\n", g_jitter_max);
@@ -289,7 +294,7 @@ static void serve_loop(void)
                 if (!ms) ms = 1;
                 double bps  = (double)g_win_bytes * 1000.0 / ms;
                 double pct  = bps / QSPI_BYTES_PER_SEC * 100.0;
-                /* 이 그림을 계속 그린다면 QSPI 만으로 몇 fps 가 한계인가 */
+                /* If this picture kept being drawn, what fps would QSPI alone allow */
                 double per_frame = g_win_frames ? (double)g_win_bytes / g_win_frames : 0;
                 double fps_cap = per_frame > 0 ? QSPI_BYTES_PER_SEC / per_frame : 0;
                 printf("DRAW ms=%u bytes=%llu frames=%u bps=%.0f pct=%.1f perframe=%.0f fpscap=%.1f\n",
@@ -298,8 +303,8 @@ static void serve_loop(void)
             fflush(stdout);
             break;
         }
-        /* 천체 기울기를 각도로 바로 넣는다(검증용) */
-        /* 한 프레임 그리는 데 걸린 시간(마이크로초) — 전력 재는 창구 */
+        /* Sets the orb tilt directly in degrees (for checking) */
+        /* How long one frame took to draw, in microseconds — the window for measuring power */
         case 'Z': {
             extern void orb_debug(float *lon, uint32_t *render_us);
             float lon = 0; uint32_t us = 0;
@@ -308,7 +313,7 @@ static void serve_loop(void)
             fflush(stdout);
             break;
         }
-        /* 가짜 IMU 기울기 — "I x y z" (mg). 인자가 없으면 IMU 없는 기기로 */
+        /* Fake IMU tilt — "I x y z" (mg). No arguments means a device with no IMU */
         case 'I': {
             extern void sim_imu_set(float x, float y, float z);
             extern void sim_imu_off(void);
@@ -317,7 +322,7 @@ static void serve_loop(void)
             else sim_imu_off();
             break;
         }
-        /* 가짜 자이로 — "X gx gy gz" (dps). 인자가 없으면 자이로 없는 기기로 */
+        /* Fake gyro — "X gx gy gz" (dps). No arguments means a device with no gyro */
         case 'X': {
             extern void sim_gyro_set(float x, float y, float z);
             extern void sim_gyro_off(void);
@@ -336,7 +341,7 @@ static void serve_loop(void)
             orb_set_tilt_deg((float)atof(line + 1));
             break;
         }
-        /* 물 상태 — 기울기 · 배 위치 · 물의 총량(보존되나 보려고) */
+        /* Water state — tilt, boat position, total volume (to see whether it is conserved) */
         case 'W' + 128: break;
         case 'V': {
             extern void water_debug(float *deg, float *boat, float *volume);
@@ -394,14 +399,16 @@ static void serve_loop(void)
             break;
         }
         case 'A': {
-            /* 🚨 물과 천체가 빠져 있었다. 둘 다 Games 목록 안에 있어서 좌표로
-             * 두드려야 했는데, 그 목록은 셋만 보이고 아래로 굴려야 나온다 —
-             * sim-exit-check 가 "Water 통과" 라고 찍던 것이 실은 Marble 을
-             * 두드린 것이었다(0909). 홈에서 바로 여는 길이 app.h 에 이미
-             * 있으니 여기에도 둔다. A 6 = 물, A 7 = 천체. */
-            /* 🚨 설정도 넣는다. 홈 목록에서 좌표로 두드려야 했는데 그 목록은
-             * 굴려야 나와서, 검사가 엉뚱한 앱을 열고도 통과했다고 찍혔다
-             * (0909 에 물·천체가 같은 이유로 들어왔다). A 8 = 설정. */
+            /* 🚨 Water and the orbs were missing. Both sit inside the Games
+             * list and had to be reached by tapping coordinates, but that list
+             * shows only three and the rest need scrolling — so what
+             * sim-exit-check reported as "Water passed" was actually tapping
+             * Marble (09-09). app.h already has a way to open them straight
+             * from home, so it goes here too. A 6 = water, A 7 = orbs. */
+            /* 🚨 Settings goes in as well. It had to be tapped by coordinate in
+             * the home list, and that list needs scrolling, so the check opened
+             * the wrong app and still reported a pass (water and the orbs came
+             * in for the same reason on 09-09). A 8 = settings. */
             static const badge_app_t *const list[] = {
                 &app_mouse, &app_meet, &app_keys, &app_calc, &app_games, &app_clock,
                 &app_water, &app_orb, &app_settings,
@@ -439,7 +446,7 @@ static void serve_loop(void)
         }
         case 'R': {
             g_win_frames++;
-            /* RGB565 그대로 넘긴다. 변환도 없고 바이트도 절반이다. */
+            /* RGB565 passed straight through. No conversion, and half the bytes. */
             printf("FRAME %d\n", W * H * 2);
             fwrite(s_fb, 1, sizeof(s_fb), stdout);
             fflush(stdout);
@@ -466,15 +473,15 @@ int main(int argc, char **argv)
     lv_indev_t *indev = lv_indev_create();
     lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
     lv_indev_set_read_cb(indev, indev_cb);
-    /* 기본 30ms 는 브라우저 너머에서 만지면 한 박자 늦게 느껴진다. */
+    /* The default 30 ms feels a beat late when it is being touched from the far side of a browser. */
     lv_timer_set_period(lv_indev_get_read_timer(indev), 12);
 
-    splash_show();          /* 실기와 같은 경로로 — 스플래시가 런처를 띄운다 */
+    splash_show();          /* the same path as the hardware — the splash brings the launcher up */
     advance(300000);
-    if (!serve) write_png("00_splash", 1);   /* 서버 모드에선 stdout 이 프레임 전용이다 */
+    if (!serve) write_png("00_splash", 1);   /* in serve mode stdout carries frames and nothing else */
     advance(1500000);
-    /* 스크린샷 모드는 가상 시계를 성큼성큼 밀기 때문에 늘 무동작 상태가 된다.
-     * 자동 꺼짐을 꺼두지 않으면 검은 화면만 찍힌다. */
+    /* Screenshot mode strides the virtual clock forward, so it is always idle.
+     * Without turning auto-off off, all it captures is a black screen. */
     if (!serve) launcher_set_timeout(0);
     if (!serve) { advance(200000); write_png("10_lock", 1); launcher_show_home(); advance(400000); }
 
@@ -487,7 +494,7 @@ int main(int argc, char **argv)
     struct { const badge_app_t *app; const char *shot; } scenes[] = {
         { &app_mouse, "02_mouse" },
         { &app_clock, "04_clock" },
-        { &app_meet,  "05_meet" },   /* 한글이 나오는 유일한 화면 — 폰트 확인용 */
+        { &app_meet,  "05_meet" },   /* the only screen with Korean on it — for checking the font */
         { &app_settings, "06_settings" },
         { &app_keys, "08_keys" },
         { &app_calc, "09_calc" },
@@ -498,12 +505,12 @@ int main(int argc, char **argv)
         advance(1200000);
         write_png(scenes[i].shot, 1);
         launcher_home();
-        advance(400000);   /* 닫는 애니메이션이 끝날 때까지 */
+        advance(400000);   /* until the closing animation has finished */
     }
 
-    advance(300000);        /* 여는 애니메이션 */
+        advance(300000);        /* the opening animation */
     advance(50000);
     launcher_home();
-    fprintf(stderr, "완료\n");
+    fprintf(stderr, "done\n");
     return 0;
 }

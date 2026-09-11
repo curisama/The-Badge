@@ -1,22 +1,24 @@
-/* USB 저장장치 모드 — 가짜 FAT 을 호스트에 물린다.
+/* USB storage mode — presenting the made-up FAT to a host.
  *
- * 여기는 "배선" 만 한다. 판을 짓는 일은 전부 usb_export.c 가 하고, 이 파일은
- * TinyUSB 가 묻는 것에 답한다: 몇 섹터냐, 이 섹터를 달라, 쓸 수 있냐.
+ * This file is only the wiring. Building the volume is entirely usb_export.c's
+ * job; this answers what TinyUSB asks: how many sectors, give me this sector,
+ * can I write.
  *
- * 🚨 **읽기 전용으로 못 박는다.** 쓰기를 열어두면 윈도우가 붙자마자
- * `System Volume Information` 을 만들려 든다. 우리 판은 그때그때 지어내는
- * 가짜라 쓰기를 받을 데가 없다. "쓰기 금지 매체" 라고 알리면 윈도우가
- * 순순히 받아들이고 아무것도 안 만든다 — 거절하는 것보다 조용하다.
+ * 🚨 **Read-only, deliberately.** Leave writing open and Windows tries to
+ * create `System Volume Information` the moment it attaches. Our volume is
+ * made up on the fly and has nowhere to put a write. Declaring the medium
+ * write-protected makes Windows accept that and create nothing — quieter than
+ * refusing writes.
  *
- * 🚨 **나갈 때는 재부팅한다.** TinyUSB 0.15 엔 정리(teardown) 가 없다
- * (`tusb_teardown` 이 헤더에 주석으로만 있다). PHY 를 OTG 에서 뺏어
- * USB-Serial/JTAG 으로 되돌리는 길이 검증된 적이 없고, 반쯤 되돌린 상태로
- * 남으면 COM 이 안 잡혀서 굽지도 못한다. 재부팅은 2초면 끝나고 결과가
- * 확실하다. 들어올 때는 반대다 — PHY 를 가져오는 방향은 esp_tinyusb 가 늘
- * 하는 일이라 그 자리에서 바꾼다.
+ * 🚨 **Leaving means rebooting.** TinyUSB 0.15 has no teardown (`tusb_teardown`
+ * exists only as a comment in the header). Taking the PHY back from OTG to
+ * USB-Serial/JTAG is a path nobody has verified, and half-reverted it leaves
+ * no serial port and no way to flash. A reboot takes two seconds and is
+ * certain. Going the other way is different — handing the PHY to OTG is what
+ * esp_tinyusb does routinely, so that happens in place.
  *
- * 🚨 벽돌 안 된다. 어떤 상태로 뻗어도 ROM 부트로더는 항상 USB-Serial/JTAG
- * 으로 올라온다 — BOOT 누른 채 RESET 이면 다시 구울 수 있다. */
+ * 🚨 It cannot be bricked. However it fails, the ROM bootloader always comes
+ * up as USB-Serial/JTAG — BOOT held with RESET can always reflash it. */
 #include "usb_export.h"
 #include "esp_log.h"
 #include "esp_system.h"
@@ -31,12 +33,12 @@ static const char *TAG = "usb_msc";
 static usb_phy_handle_t s_phy;
 static TaskHandle_t     s_task;
 static volatile bool    s_active;
-static volatile bool    s_ejected;     /* 호스트가 빼갔다 */
+static volatile bool    s_ejected;     /* the host ejected it */
 
-/* ── 서술자 ──────────────────────────────────────────────────
- * 🚨 VID 는 에스프레시프 것(0x303A)을 쓴다. 남의 VID 를 빌려 쓰면 그 회사
- * 드라이버가 끼어들 수 있다. PID 는 에스프레시프가 자작용으로 열어 둔
- * 0x4000 대에서 MSC 자리를 쓴다. */
+/* ── descriptors ─────────────────────────────────────────────
+ * 🚨 The VID is Espressif's (0x303A). Borrowing someone else's VID invites
+ * their driver to attach. The PID uses the MSC slot in the 0x4000 range
+ * Espressif keeps open for self-built devices. */
 #define USB_VID   0x303A
 #define USB_PID   0x4002
 #define USB_BCD   0x0200
@@ -68,14 +70,14 @@ static const uint8_t s_desc_cfg[] = {
     TUD_MSC_DESCRIPTOR(ITF_NUM_MSC, 0, EPNUM_MSC_OUT, EPNUM_MSC_IN, 64),
 };
 
-/* 🚨 일련번호는 있어야 한다. 없으면 윈도우가 꽂을 때마다 새 장치로 보고
- * 드라이브 문자를 매번 다르게 준다. */
+/* 🚨 A serial number is required. Without one, Windows treats every
+ * connection as a new device and assigns a different drive letter each time. */
 static const char *const s_desc_str[] = {
-    (const char[]){ 0x09, 0x04 },   /* 0: 영어(미국) */
-    "Badge",                        /* 1: 만든 이 */
-    "Badge Recorder",               /* 2: 제품 */
-    "BADGE0001",                    /* 3: 일련번호 */
-    "Recordings",                   /* 4: MSC 인터페이스 */
+    (const char[]){ 0x09, 0x04 },   /* 0: English (US) */
+    "Badge",                        /* 1: manufacturer */
+    "Badge Recorder",               /* 2: product */
+    "BADGE0001",                    /* 3: serial */
+    "Recordings",                   /* 4: the MSC interface */
 };
 
 const uint8_t *tud_descriptor_device_cb(void) { return (const uint8_t *)&s_desc_dev; }
@@ -114,14 +116,15 @@ void tud_msc_inquiry_cb(uint8_t lun, uint8_t vid[8], uint8_t pid[16], uint8_t re
     memcpy(rev, "1.0 ", 4);
 }
 
-/* 🚨 "매체가 있나" 에 거짓을 돌려주면 호스트는 드라이브가 빈 것으로 본다.
- * 배지에서 "끝" 을 누르면 먼저 이걸로 **빠졌다고 알리고** 잠깐 뒤에 선을
- * 놓는다 — 그래야 윈도우가 놀라지 않는다. */
+/* 🚨 Answering false to "is there media" makes the host see an empty drive.
+ * Pressing done on the badge uses this to **report the medium as removed**
+ * first, and drops the line a moment later — which is what stops Windows
+ * complaining. */
 bool tud_msc_test_unit_ready_cb(uint8_t lun)
 {
     (void)lun;
     if (s_ejected) {
-        tud_msc_set_sense(lun, SCSI_SENSE_NOT_READY, 0x3A, 0x00);  /* 매체 없음 */
+        tud_msc_set_sense(lun, SCSI_SENSE_NOT_READY, 0x3A, 0x00);  /* no medium */
         return false;
     }
     return true;
@@ -134,12 +137,12 @@ void tud_msc_capacity_cb(uint8_t lun, uint32_t *block_count, uint16_t *block_siz
     *block_size  = (uint16_t)usb_export_sector_size();
 }
 
-/* 사람이 윈도우에서 "안전하게 제거" 를 누르면 여기로 온다. */
+/* This is where "safely remove" in Windows arrives. */
 bool tud_msc_start_stop_cb(uint8_t lun, uint8_t power_condition, bool start, bool load_eject)
 {
     (void)lun; (void)power_condition;
     if (load_eject && !start) {
-        ESP_LOGI(TAG, "호스트가 빼갔다 — COM 으로 되돌아간다");
+        ESP_LOGI(TAG, "host ejected it — returning to serial");
         s_ejected = true;
     }
     return true;
@@ -151,8 +154,9 @@ int32_t tud_msc_read10_cb(uint8_t lun, uint32_t lba, uint32_t offset,
     (void)lun;
     const uint32_t sec = usb_export_sector_size();
     if (lba >= usb_export_sectors()) return -1;
-    /* 🚨 호스트가 섹터 한가운데부터 달라고 할 수 있다. 섹터를 통째로 지어
-     * 놓고 거기서 잘라 준다 — 반쪽만 지으면 경계 계산이 두 벌이 된다. */
+    /* 🚨 The host may ask for something starting mid-sector. A whole sector is
+     * generated and then cut from — generating half of one would mean two
+     * copies of the boundary arithmetic. */
     static uint8_t s_sec[512];
     if (sec > sizeof s_sec) return -1;
     if (!usb_export_read(lba, s_sec)) return -1;
@@ -166,14 +170,14 @@ int32_t tud_msc_read10_cb(uint8_t lun, uint32_t lba, uint32_t offset,
 bool tud_msc_is_writable_cb(uint8_t lun)
 {
     (void)lun;
-    return false;                    /* 읽기 전용 매체 */
+    return false;                    /* write-protected medium */
 }
 
 int32_t tud_msc_write10_cb(uint8_t lun, uint32_t lba, uint32_t offset,
                            uint8_t *buffer, uint32_t bufsize)
 {
     (void)lun; (void)lba; (void)offset; (void)buffer; (void)bufsize;
-    return -1;                       /* 여기 올 일이 없다 */
+    return -1;                       /* never reached */
 }
 
 int32_t tud_msc_scsi_cb(uint8_t lun, const uint8_t scsi_cmd[16],
@@ -182,28 +186,29 @@ int32_t tud_msc_scsi_cb(uint8_t lun, const uint8_t scsi_cmd[16],
     (void)lun; (void)buffer; (void)bufsize;
     switch (scsi_cmd[0]) {
     case SCSI_CMD_PREVENT_ALLOW_MEDIUM_REMOVAL:
-        return 0;                    /* 잠글 것이 없다 */
+        return 0;                    /* nothing to lock */
     default:
         tud_msc_set_sense(lun, SCSI_SENSE_ILLEGAL_REQUEST, 0x20, 0x00);
         return -1;
     }
 }
 
-/* ── 돌리기 ──────────────────────────────────────────────── */
+/* ── running it ──────────────────────────────────────────── */
 static void usb_task(void *arg)
 {
     (void)arg;
-    /* 🚨 tusb_init 을 **이 태스크 안에서** 부른다. 그 안에서 인터럽트를
-     * 잡는데(esp_intr_alloc), 인터럽트는 부른 코어에 붙는다. 딴 데서
-     * 부르면 인터럽트와 처리 태스크가 다른 코어에 흩어진다. */
+    /* 🚨 tusb_init is called **inside this task**. It allocates an interrupt
+     * (esp_intr_alloc), and interrupts bind to the core that allocated them.
+     * Called elsewhere, the interrupt and the task handling it end up on
+     * different cores. */
     if (!tusb_init()) {
-        ESP_LOGE(TAG, "tusb_init 실패");
+        ESP_LOGE(TAG, "tusb_init failed");
         s_active = false;
         s_task = NULL;
         vTaskDelete(NULL);
         return;
     }
-    ESP_LOGI(TAG, "드라이브로 올라왔다 — %d개 / %lu섹터",
+    ESP_LOGI(TAG, "mounted as a drive — %d files, %lu sectors",
              usb_export_files(), (unsigned long)usb_export_sectors());
     while (s_active) tud_task();
     vTaskDelete(NULL);
@@ -216,14 +221,14 @@ bool usb_msc_start(void)
     usb_export_build();
     s_ejected = false;
 
-    /* PHY 를 USB-Serial/JTAG 에서 OTG 로 옮긴다. 이 순간 COM 이 사라진다. */
+    /* Move the PHY from USB-Serial/JTAG to OTG. The serial port vanishes here. */
     usb_phy_config_t cfg = {
         .controller = USB_PHY_CTRL_OTG,
         .target     = USB_PHY_TARGET_INT,
         .otg_mode   = USB_OTG_MODE_DEVICE,
     };
     if (usb_new_phy(&cfg, &s_phy) != ESP_OK) {
-        ESP_LOGE(TAG, "PHY 를 못 가져왔다");
+        ESP_LOGE(TAG, "could not take the PHY");
         return false;
     }
 
@@ -239,13 +244,14 @@ bool usb_msc_start(void)
 void usb_msc_stop(void)
 {
     if (!s_active) return;
-    /* 먼저 "매체가 빠졌다" 고 알리고 잠깐 둔다. 호스트가 그걸 읽을 틈을
-     * 안 주고 선을 끊으면 윈도우가 "장치를 제거하지 않고 뽑았다" 고 짖는다. */
+    /* Report "medium removed" first and wait a moment. Cutting the line
+     * without giving the host a chance to read that makes Windows complain
+     * about a device removed without ejecting. */
     s_ejected = true;
     vTaskDelay(pdMS_TO_TICKS(400));
     tud_disconnect();
     vTaskDelay(pdMS_TO_TICKS(200));
-    ESP_LOGI(TAG, "COM 으로 되돌아간다 (재부팅)");
+    ESP_LOGI(TAG, "returning to serial (rebooting)");
     esp_restart();
 }
 

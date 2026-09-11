@@ -3,6 +3,10 @@
 
 It starts badge_sim --serve as a child and takes the screen over a pipe.
 
+🚨 One child, started once and kept for the life of the server. Rebuilding the
+simulator does not reach it — restart this server after sim/build.py or you are
+looking at the binary from whenever you started it.
+
 The point is that **only the tiles that changed are sent**. Rolling the whole
 466x466 into a PNG is 30 KB a frame, while the clock moves one hand a second
 and the home screen changes nothing at all. The screen is cut into 64 px tiles

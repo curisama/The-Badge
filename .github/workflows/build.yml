@@ -1,0 +1,75 @@
+name: build
+
+# Builds the firmware and the simulator on every push, and attaches flashable
+# binaries to a tag. Nobody has to remember to build before a release, and a
+# pull request that breaks the build says so here rather than on someone's
+# desk.
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build for esp32s3
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.5
+          target: esp32s3
+
+      # Three files and their offsets. The web flasher and esptool both need
+      # the same list, so it is written once here.
+      - name: Collect flashable images
+        run: |
+          mkdir -p out
+          cp build/bootloader/bootloader.bin       out/
+          cp build/partition_table/partition-table.bin out/
+          cp build/badge_fw.bin                    out/
+          cat > out/manifest.json <<'JSON'
+          {
+            "name": "AMOLED Badge",
+            "version": "${{ github.ref_name }}",
+            "new_install_prompt_erase": true,
+            "builds": [{
+              "chipFamily": "ESP32-S3",
+              "parts": [
+                { "path": "bootloader.bin",       "offset": 0 },
+                { "path": "partition-table.bin",  "offset": 32768 },
+                { "path": "badge_fw.bin",         "offset": 65536 }
+              ]
+            }]
+          }
+          JSON
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: out/
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/*
+
+  simulator:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y build-essential
+      # The simulator needs LVGL, which normally arrives with the IDF
+      # component manager. Fetch it directly so this job does not need a
+      # toolchain it will never use.
+      - name: Fetch LVGL
+        run: |
+          mkdir -p managed_components
+          git clone --depth 1 --branch v9.5.0 \
+            https://github.com/lvgl/lvgl managed_components/lvgl__lvgl
+      - run: python3 sim/build.py
+      - run: tools/regress.sh

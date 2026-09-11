@@ -19,6 +19,17 @@ There is no cloud anything. WiFi is used for exactly two things — setting the
 clock, and only when the clock is stale — and you type the network on the badge
 itself.
 
+## Flash it without building
+
+If you only want the firmware on a board, there is a browser flasher — no
+toolchain, nothing to install:
+
+**<https://curisama.github.io/amoled-badge/flash/>**
+
+It needs Chrome or Edge (WebSerial is not in Safari or Firefox). For those,
+grab the binaries from a release and use `esptool`; the page lists the
+offsets.
+
 ## Build
 
 You need [ESP-IDF 5.5](https://docs.espressif.com/projects/esp-idf/en/stable/esp32s3/get-started/)

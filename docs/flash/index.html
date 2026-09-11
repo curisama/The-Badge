@@ -1,0 +1,57 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flash the AMOLED Badge</title>
+<style>
+  :root { color-scheme: light dark; }
+  body  { font: 16px/1.6 system-ui, sans-serif; max-width: 42rem;
+          margin: 0 auto; padding: 3rem 1.5rem; }
+  h1    { font-size: 1.7rem; margin-bottom: .2rem; }
+  .sub  { opacity: .65; margin-top: 0; }
+  .card { border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+          border-radius: 12px; padding: 1.2rem 1.4rem; margin: 1.6rem 0; }
+  code  { background: color-mix(in srgb, currentColor 10%, transparent);
+          padding: .1em .35em; border-radius: 4px; }
+  .warn { border-left: 3px solid #c8453a; padding-left: .9rem; }
+  esp-web-install-button { display: block; margin: 1rem 0; }
+</style>
+
+<h1>AMOLED Badge</h1>
+<p class="sub">Flash it from this page. Nothing to install.</p>
+
+<div class="card">
+  <esp-web-install-button manifest="manifest.json"></esp-web-install-button>
+  <p style="margin:.4rem 0 0"><small>
+    Plug the badge in with a USB-C data cable, press <b>Connect</b>, and pick
+    the port that appears.
+  </small></p>
+</div>
+
+<div class="card warn">
+  <p><b>Check the board first.</b> This build is for the Waveshare
+  <b>ESP32-S3-Touch-AMOLED-1.75</b> with <b>32&nbsp;MB of flash</b>. The same
+  board is sold with less; the partition table assumes 32&nbsp;MB and the
+  recording area will not fit on a smaller one.</p>
+  <p style="margin-bottom:0">Flashing replaces everything on the board,
+  including any recordings already on it.</p>
+</div>
+
+<h2>If the Connect button is greyed out</h2>
+<p>The page talks to the board through WebSerial, which only Chrome, Edge and
+other Chromium browsers have. Safari and Firefox cannot do it — use
+<code>esptool</code> from a terminal instead:</p>
+<pre><code>esptool.py --chip esp32s3 write_flash \
+  0x0     bootloader.bin \
+  0x8000  partition-table.bin \
+  0x10000 badge_fw.bin</code></pre>
+
+<h2>If nothing appears when you press Connect</h2>
+<p>Most of the time it is the cable: plenty of USB-C cables carry power only.
+Try another one. Failing that, hold <b>BOOT</b>, tap <b>RESET</b>, release
+<b>BOOT</b> — that puts the chip in download mode, where it always shows up.</p>
+
+<p style="opacity:.6"><small>Source and build instructions:
+<a href="https://github.com/curisama/amoled-badge">github.com/curisama/amoled-badge</a></small></p>
+
+<script type="module"
+        src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>

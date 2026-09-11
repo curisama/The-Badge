@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""홈에서 좌우로 쓸어 쪽이 넘어가나 확인한다.
+"""Checks that swiping left and right on home turns the page.
 
-🚨 제스처는 '눌린 객체' 에게만 간다. 아이콘 위에서 쓸면 아이콘이 먹고
-   화면까지 안 올라와 쪽이 안 넘어간다(0909). 아이콘 위에서도 쓸어본다.
+🚨 A gesture only reaches the 'pressed object'. Swiping across an icon is taken
+   by the icon, never reaches the screen, and the page does not turn (09-09).
+   So it swipes across an icon too.
 """
 import subprocess, os, sys, tempfile
 D = os.path.dirname(os.path.abspath(__file__)) + "/.."
@@ -14,12 +15,12 @@ def rd(n):
     b=b''
     while len(b)<n:
         c=p.stdout.read(n-len(b))
-        if not c: raise SystemExit("★ 죽음")
+        if not c: raise SystemExit("★ died")
         b+=c
     return b
 def frame():
     send("R\n"); h=p.stdout.readline().split()
-    if not h: raise SystemExit("★ 응답없음")
+    if not h: raise SystemExit("★ no answer")
     return rd(int(h[1]))
 def step(ms): send(f"P {ms}\n")
 def swipe(x0, y0, x1, y1, n=8):
@@ -31,13 +32,13 @@ def swipe(x0, y0, x1, y1, n=8):
 
 for _ in range(8): step(100); frame()
 send("K 0\n"); step(100); frame()
-# 🚨 시뮬은 잠금화면으로 시작한다. 홈으로 보내야 쓸기를 시험할 수 있다.
+# 🚨 The simulator starts on the lock screen. It has to be sent home before swipes can be tried.
 send("G\n")
 for _ in range(10): step(60); frame()
 base = frame()
-# 화면을 그림으로 남겨두면 왜 실패했는지 눈으로 본다.
-# 🚨 PIL 이 없는 파이썬도 있다(ESP-IDF 것). 없으면 그냥 건너뛴다 —
-#    검사가 도구 때문에 못 도는 일은 없어야 한다.
+# Leaving the screens as pictures makes a failure visible.
+# 🚨 Some Pythons have no PIL (ESP-IDF's does not). Missing, it is simply skipped —
+#    a check must never fail to run over a tool.
 try:
     from PIL import Image
     def save(raw, name):
@@ -50,17 +51,17 @@ except ImportError:
     def save(raw, name): pass
 save(base, 'swipe_before')
 fails = 0
-for name, y in (("빈 배경에서", 233), ("아이콘 위에서", 111)):
+for name, y in (("on the bare background", 233), ("across an icon", 111)):
     swipe(360, y, 110, y)
     a = frame()
     save(a, 'swipe_after_'+name[:2])
     moved = sum(1 for i in range(0, 466*466, 29) if a[2*i:2*i+2] != base[2*i:2*i+2]) > 300
-    print(f"  {name} 왼쪽으로 쓸기 → {'넘어감' if moved else '★ 안 넘어감'}")
+    print(f"  {name}, swipe left → {'turned' if moved else '★ did not turn'}")
     if not moved: fails += 1
-    swipe(110, y, 360, y)          # 되돌린다
+    swipe(110, y, 360, y)          # back again
     b = frame()
     back = sum(1 for i in range(0, 466*466, 29) if b[2*i:2*i+2] != base[2*i:2*i+2]) < 300
-    print(f"  {name} 오른쪽으로 되돌리기 → {'돌아옴' if back else '★ 안 돌아옴'}")
+    print(f"  {name}, swipe back right → {'returned' if back else '★ did not return'}")
     if not back: fails += 1
-print("전부 통과" if fails == 0 else f"★ {fails}건 실패")
+print("all passed" if fails == 0 else f"★ {fails} failed")
 sys.exit(1 if fails else 0)

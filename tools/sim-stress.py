@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""판 여섯 개를 최악 조건에서 굴린다 — 시계를 흔들고, 마구 드나들고.
+"""Runs the six boards under the worst conditions — a shaken clock, and
+entering and leaving at random.
 
-🚨 시뮬은 시간이 자로 잰 듯 흐르고 메모리도 무한하다. 그대로 두면 실기에서만
-   터지는 것들을 못 잡는다. 'J' 로 시계를 흔들고, SIM_TIGHT=1 로 빌드하면
-   LVGL 메모리가 실기만큼(87KB, BLE 켜면 13KB) 좁아진다.
+🚨 In the simulator time flows as evenly as a ruler and memory is unlimited.
+   Left that way it catches nothing that only breaks on the hardware. 'J' shakes
+   the clock, and building with SIM_TIGHT=1 narrows LVGL's memory to what the
+   hardware has (87 KB, or 13 KB with BLE on).
 """
 import subprocess, sys, os, tempfile, random
 D = os.path.dirname(os.path.abspath(__file__)) + "/.."
@@ -15,12 +17,12 @@ def rd(n):
     b = b''
     while len(b) < n:
         c = p.stdout.read(n - len(b))
-        if not c: raise SystemExit("★ 시뮬이 죽었다")
+        if not c: raise SystemExit("★ the simulator died")
         b += c
     return b
 def frame():
     send("R\n"); h = p.stdout.readline().split()
-    if not h: raise SystemExit("★ 시뮬이 죽었다(응답 없음)")
+    if not h: raise SystemExit("★ the simulator died (no answer)")
     return rd(int(h[1]))
 def step(ms): send(f"P {ms}\n")
 def line(cmd):
@@ -34,7 +36,7 @@ GRID = {"Bricks": (149, 145), "Marble": (317, 145), "Pop": (141, 233),
 
 for _ in range(8): step(100); frame()
 send("K 0\n"); step(100); frame()
-print(line("J 250\n"))            # 실기처럼 시계를 흔든다
+print(line("J 250\n"))            # shake the clock the way the hardware does
 random.seed(3)
 worst = 0
 import sys
@@ -44,7 +46,7 @@ for rnd in range(ROUNDS):
         send("A 4\n"); step(400); frame()
         tap(x, y); step(400); frame()
         print(line("D 0\n"), end="\r")
-        # 마구 문댄다
+        # random smearing
         for k in range(18):
             a, b = random.randint(60, 400), random.randint(60, 400)
             send(f"T {a} {b} 1\n"); step(40); frame()
@@ -55,5 +57,5 @@ for rnd in range(ROUNDS):
         if worst == 0 or fps < worst: worst = fps
         send("H\n")
         for _ in range(12): step(50); frame()
-    print(f"  {rnd+1}바퀴 통과")
-print(f"전부 통과 · 대역폭이 허용하는 최저 fps {worst:.1f}")
+    print(f"  round {rnd+1} passed")
+print(f"all passed · lowest fps the bandwidth allows {worst:.1f}")

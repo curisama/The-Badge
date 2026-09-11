@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""판마다 들어갔다 홈으로 나오기를 해본다.
+"""Enters each board and comes back home.
 
-🚨 나가는 길에서 두 번 죽었다(달·지구 0909, 물 0909). 원인이 같다 —
-   그림이 가리키는 메모리를 그림보다 먼저 놓으면, 지워지기 전에 한 번 더
-   그리면서 이미 놓은 자리를 읽는다. 눈으로는 "홈 누르면 끊긴다"로만 보인다.
-   새 판을 넣을 때마다 이걸 돌려라.
+🚨 It died on the way out twice (the orbs 09-09, water 09-09). The cause was the
+   same both times — freeing the memory a picture points at before the picture
+   itself means one more draw happens before deletion and reads what was
+   already freed. To the eye it only looks like "pressing home cuts out".
+   Run this every time a new board goes in.
 
   python3 tools/sim-exit-check.py
 """
@@ -17,12 +18,12 @@ def rd(n):
     b=b''
     while len(b)<n:
         c=p.stdout.read(n-len(b))
-        if not c: raise SystemExit("★ 시뮬이 죽었다")
+        if not c: raise SystemExit("★ the simulator died")
         b+=c
     return b
 def frame():
     send("R\n"); h=p.stdout.readline().split()
-    if not h: raise SystemExit("★ 시뮬이 죽었다(응답 없음)")
+    if not h: raise SystemExit("★ the simulator died (no answer)")
     return rd(int(h[1]))
 def step(ms): send(f"P {ms}\n")
 def tap(x,y,hold=140):
@@ -36,7 +37,7 @@ for name in ["Water","Moon","Earth","Pop","Bricks","Marble"]:
     send("A 4\n"); step(400); frame()
     x,y=GRID[name]; tap(x,y); step(500); frame()
     for _ in range(10): step(33); frame()
-    send("H\n")                      # 파워 버튼 = 홈
+    send("H\n")                      # power button = home
     for _ in range(15): step(50); frame()
-    print(f"{name} → 홈 통과")
-print("전부 통과")
+    print(f"{name} → home passed")
+print("all passed")

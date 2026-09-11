@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""우리 코드가 내부 RAM 에 상시로 잡아두는 양(.bss)을 맵에서 뽑는다.
+"""Pulls from the map file how much internal RAM our code holds permanently (.bss).
 
-🚨 큰 배열을 static 으로 두면 앱을 안 켜도 내부 RAM 을 물고 있다.
-   내부 RAM 은 통틀어 116KB 뿐이라 금방 모자란다(물 입자가 27KB 였다).
-   큰 것은 PSRAM 에서 잡고 놓아야 한다.
+🚨 A large array left static holds internal RAM even with its app closed.
+   Internal RAM is only 116 KB all told and runs out quickly (the water
+   particles were 27 KB). Large things have to be allocated in PSRAM and freed.
 """
 import re
 m = open('build/badge_fw.map', encoding='utf-8', errors='replace').read()

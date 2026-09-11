@@ -26,7 +26,3 @@ sim/lvgl/
 # Python bytecode. 🚨 A .pyc records the absolute path it was compiled from.
 __pycache__/
 *.pyc
-
-# Photographic planet maps baked by tools/make-orb-texture.py. Whatever you
-# bake is yours to license, so it is not committed here.
-main/assets/orb_tex_*.h

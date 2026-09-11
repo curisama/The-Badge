@@ -86,7 +86,14 @@ def is_fresh(src: Path, obj: Path) -> bool:
     the headers it pulls in.
 
     🚨 Looking only at the source time reuses a stale object after a header
-       changes. The list gcc leaves with -MMD is checked too."""
+       changes. The list gcc leaves with -MMD is checked too.
+
+    🚨 That list still cannot see a header that did not exist when the object
+       was built. orb.c picks up its planet maps with __has_include, so baking
+       a map for the first time changes what compiles while every timestamp
+       says nothing moved — the simulator went on drawing code planets over
+       real ones. Touch the source after adding a file it can conditionally
+       include."""
     if not obj.exists():
         return False
     t = obj.stat().st_mtime

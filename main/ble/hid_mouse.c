@@ -308,25 +308,52 @@ static void hidd_cb(void *handler_args, esp_event_base_t base, int32_t id, void 
     }
 }
 
-void port_hid_start(void)
+bool port_hid_start(void)
 {
     static int64_t s_start_us;
     s_start_us = esp_timer_get_time();
     /* The CPU must not sleep while BLE is up. Sleeping makes it miss the
      * connection interval, so the mouse stutters or drops entirely. */
     if (!s_pm_held) { port_pm_hold(true); s_pm_held = true; }
+
+    /* 🚨 Do not go near the controller without the internal RAM it needs.
+     *
+     * Measured on hardware: bringing BLE up takes internal free from 74.9 KB
+     * to 13 KB, so it wants about 62 KB. If it is short, esp_bt_controller
+     * does not return an error — it asserts inside itself (BLE assert emi.c
+     * 164), the assert never returns, and the interrupt watchdog reboots the
+     * board. Every error path below is therefore unreachable in the one case
+     * that matters, and what a person sees is not "the mouse did not start"
+     * but a badge stuck rebooting.
+     *
+     * The window this happens in is real: the clock sync holds WiFi up for
+     * the first ten seconds after a cold boot, which leaves 22 KB free.
+     * Opening the Air Mouse in those ten seconds used to be a boot loop.
+     *
+     * 66 KB is the bar — above the 62 KB measured, and still below the 69-75 KB
+     * that is free with an app open. */
+    size_t have = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    if (!s_inited && have < 66 * 1024) {
+        ESP_LOGW(TAG, "not starting BLE: internal RAM %uKB, needs 66KB "
+                      "(WiFi is probably still up for the clock)",
+                 (unsigned)(have / 1024));
+        snprintf(s_peer, sizeof(s_peer), "busy — try again");
+        if (s_pm_held) { port_pm_hold(false); s_pm_held = false; }
+        return false;
+    }
+
     if (s_inited) {
         if (!s_connected) esp_hid_ble_gap_adv_start();
-        return;
+        return true;
     }
     /* Bring the stack up once. Repeated up and down is unstable. */
     if (esp_hid_gap_init(HIDD_BLE_MODE) != ESP_OK) {
         ESP_LOGE(TAG, "GAP init failed");
-        return;
+        return false;
     }
     if (esp_hid_ble_gap_adv_init(ESP_HID_APPEARANCE_MOUSE, s_cfg.device_name) != ESP_OK) {
         ESP_LOGE(TAG, "advertising setup failed");
-        return;
+        return false;
     }
     /* This line was missing. HID's GATT service is created through Bluedroid's
      * GATTS callback — without registering it the service is never created at
@@ -339,17 +366,18 @@ void port_hid_start(void)
     extern esp_err_t time_svc_register(void);
     if (time_svc_register() != ESP_OK) {
         ESP_LOGE(TAG, "GATTS registration failed");
-        return;
+        return false;
     }
     if (esp_hidd_dev_init(&s_cfg, ESP_HID_TRANSPORT_BLE, hidd_cb, &s_dev) != ESP_OK) {
         ESP_LOGE(TAG, "HID device creation failed");
-        return;
+        return false;
     }
     s_inited = true;
     snprintf(s_peer, sizeof(s_peer), "advertising");
     ESP_LOGI(TAG, "BLE up (%lld ms) — internal RAM %uKB",
              (esp_timer_get_time() - s_start_us) / 1000,
              (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024));
+    return true;
 }
 
 /* The BLE stack takes 60-70 KB of internal RAM. This board has 125 KB free

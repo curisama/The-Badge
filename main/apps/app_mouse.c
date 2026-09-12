@@ -219,6 +219,8 @@ static void sens_save(void)
     port_kv_write("mousesens", t, sizeof t);
 }
 
+static bool s_hid_up;     /* did port_hid_start() actually bring the stack up? */
+
 static void sens_paint(void)
 {
     if (s_sens_lbl) lv_label_set_text_fmt(s_sens_lbl, "%d", s_sens + 1);
@@ -998,6 +1000,12 @@ static void poll_cb(lv_timer_t *t)
     /* LVGL redraws whenever a style is set, even to the value it already had.
      * This was invalidating a 452 px ring 2.5 times a second for nothing —
      * only touch it when something changed. */
+    /* 🚨 BLE refuses to start while the boot-time clock sync still holds WiFi,
+     * because there is not enough internal RAM for both. That clears by itself
+     * in a few seconds, so keep asking rather than leaving the app sitting on
+     * "busy" until somebody thinks to back out and come in again. */
+    if (!s_hid_up) s_hid_up = port_hid_start();
+
     int conn = port_hid_connected() ? 1 : 0;
     uint32_t pk = port_hid_passkey();
     const char *peer = port_hid_peer();
@@ -1025,6 +1033,7 @@ static void poll_cb(lv_timer_t *t)
 static void enter(lv_obj_t *root)
 {
     port_crumb(CRUMB_MOUSE);
+    s_hid_up = false;         /* poll_cb keeps asking until it is */
     /* The outer ring is both the scroll area and the connection indicator */
     s_ring = lv_arc_create(root);
     lv_obj_set_size(s_ring, 452, 452);

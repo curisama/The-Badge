@@ -68,7 +68,10 @@ int port_touch_count(void);
 /* ── BLE HID mouse ──────────────────────────────────────────
  * This badge is the peripheral. Being standard HID, phones, PCs and TVs take
  * it with no driver. */
-void        port_hid_start(void);      /* bring the stack up and start advertising */
+/* Brings the stack up and starts advertising. false means it is not up — the
+ * only reason is that internal RAM was too low (see hid_mouse.c), which clears
+ * on its own once WiFi lets go, so a caller that wants BLE should ask again. */
+bool        port_hid_start(void);
 void        port_hid_stop(void);       /* stop advertising only; keep the connection */
 bool        port_hid_connected(void);
 bool        port_hid_up(void);          /* is the stack up? (separate from being connected) */

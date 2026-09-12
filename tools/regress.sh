@@ -148,6 +148,28 @@ grep -q "bool have = port_imu_accel3" main/apps/app_water.c \
   && grep -q "if (!have)" main/apps/app_water.c \
   && ok "water substitutes a value while the IMU cannot be trusted" || bad "water uses values it cannot trust"
 
+echo "════ starting BLE ════"
+# 🚨 esp_bt_controller does not return an error when it cannot allocate — it
+#    asserts inside itself (BLE assert emi.c 164) and the interrupt watchdog
+#    reboots the board. Every error path in port_hid_start() is unreachable in
+#    the one case that matters. Measured on hardware: BLE needs about 62 KB of
+#    internal RAM, and the boot-time clock sync leaves 22 KB while it holds
+#    WiFi — opening the Air Mouse in those ten seconds was a boot loop.
+#    So the free-RAM check has to come BEFORE the call into the controller.
+python3 - <<'EOF' && ok "BLE checks free internal RAM before touching the controller" || bad "BLE goes to the controller without checking internal RAM first"
+import re, sys
+src = open("main/ble/hid_mouse.c", encoding="utf-8").read()
+m = re.search(r"bool port_hid_start\(void\)\s*\{(.*?)\n\}", src, re.S)
+if not m: print("  cannot find port_hid_start()"); sys.exit(1)
+body = m.group(1)
+guard = body.find("heap_caps_get_free_size(MALLOC_CAP_INTERNAL)")
+call  = body.find("esp_hid_gap_init(")
+if guard < 0: print("  it never reads the free internal RAM"); sys.exit(1)
+if call < 0:  print("  cannot find the call into the controller"); sys.exit(1)
+if guard > call: print("  the check comes after the controller call, which is too late"); sys.exit(1)
+if "return false" not in body[guard:call]: print("  it reads the RAM but does not refuse"); sys.exit(1)
+EOF
+
 echo "════ the mouse status text ════"
 # 🚨 The label has to be written once when it is made — otherwise LVGL's default 'Text' stays
 grep -A2 "s_state = lv_label_create" main/apps/app_mouse.c | grep -q "lv_label_set_text(s_state" \

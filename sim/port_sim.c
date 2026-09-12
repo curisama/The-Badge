@@ -136,7 +136,7 @@ const char *port_bt_status(void) { return "off"; }
 static bool g_hid_on;
 static int  g_hid_frames;
 
-void port_hid_start(void) { g_hid_on = true;  g_hid_frames = 0; fprintf(stderr, "[hid] advertising\n"); }
+bool port_hid_start(void) { g_hid_on = true;  g_hid_frames = 0; fprintf(stderr, "[hid] advertising\n"); return true; }
 void port_hid_stop(void)  { g_hid_on = false; }
 bool port_hid_connected(void) { return g_hid_on && ++g_hid_frames > 3; }  /* pretends to connect a moment later */
 const char *port_hid_peer(void) { return port_hid_connected() ? "sim host" : "advertising"; }

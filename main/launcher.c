@@ -322,7 +322,16 @@ static void batt_log_cb(lv_timer_t *t)
      * Plugged in, there is no battery to save anyway. */
     static bool held;
     bool plugged = port_battery_plugged();
-    if (plugged != held) { port_pm_hold(plugged); held = plugged; }
+    if (plugged != held) {
+        port_pm_hold(plugged);
+        /* 🚨 Plugging in is the badge arriving somewhere, and somewhere is
+         * usually where its WiFi is. Housekeeping runs every thirty minutes,
+         * so without this a day out with the clock drifting can go another
+         * half hour after you are home. port_time_autosync() decides for
+         * itself whether it is due, so this costs nothing when it is not. */
+        if (plugged) port_time_autosync();
+        held = plugged;
+    }
     port_uptime_mark();
 }
 

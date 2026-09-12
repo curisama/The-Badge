@@ -308,6 +308,8 @@ static void hidd_cb(void *handler_args, esp_event_base_t base, int32_t id, void 
     }
 }
 
+bool port_hid_ready(void) { return s_inited; }
+
 bool port_hid_start(void)
 {
     static int64_t s_start_us;

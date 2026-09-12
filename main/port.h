@@ -72,6 +72,9 @@ int port_touch_count(void);
  * only reason is that internal RAM was too low (see hid_mouse.c), which clears
  * on its own once WiFi lets go, so a caller that wants BLE should ask again. */
 bool        port_hid_start(void);
+/* Is the BLE stack up? Asking is free and has no side effects, unlike calling
+ * port_hid_start() again, which restarts advertising. */
+bool        port_hid_ready(void);
 void        port_hid_stop(void);       /* stop advertising only; keep the connection */
 bool        port_hid_connected(void);
 bool        port_hid_up(void);          /* is the stack up? (separate from being connected) */

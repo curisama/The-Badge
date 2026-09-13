@@ -26,3 +26,5 @@ sim/lvgl/
 # Python bytecode. 🚨 A .pyc records the absolute path it was compiled from.
 __pycache__/
 *.pyc
+docs/flash/*.bin
+docs/flash/manifest.json

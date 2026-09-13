@@ -9,12 +9,17 @@ It needs two things to work:
 Pages provides it; serving the folder off a laptop will not.
 
 **The three binaries next to it,** plus the `manifest.json` that lists their
-flash offsets. The build workflow produces exactly that set — download the
-`firmware` artifact from a run, or a release's files, and drop them in here.
+flash offsets. They are not in the repository and should not be — a 3.6 MB
+image committed on every firmware change goes stale without anyone noticing,
+and a stranger ends up flashing an old build. `.github/workflows/build.yml`
+copies them in as it publishes, so the page always offers what the current
+commit builds.
 
-To publish: enable Pages for this repository, source *Deploy from a branch*,
-folder `/docs`. The page is then at
-`https://<user>.github.io/amoled-badge/flash/`.
+To publish: enable Pages for this repository with source **GitHub Actions**
+(not *Deploy from a branch* — that would serve `docs/` as it sits in git,
+without the binaries). The page is then at
+`https://<user>.github.io/amoled-badge/flash/`, rebuilt on every push to
+`main`.
 
 🚨 The offsets in `manifest.json` are not decoration — they have to match
 `partitions.csv`. If the partition table ever moves, this file moves with it

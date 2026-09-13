@@ -11,6 +11,18 @@ on:
   pull_request:
   workflow_dispatch:
 
+# The deploy job needs these; the build jobs do not use them.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time, and a newer push wins. Two pushes close together
+# would otherwise race to publish and the older one could land last.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
 jobs:
   firmware:
     runs-on: ubuntu-latest
@@ -52,6 +64,18 @@ jobs:
           name: firmware
           path: out/
 
+      # 🚨 The web flasher reads manifest.json from beside itself on Pages, and
+      # the binaries are not in the repository — committing a 3.6 MB image on
+      # every firmware change would go stale silently and nobody would notice
+      # until a stranger flashed an old build. They are put in here instead, so
+      # what the page offers is whatever this commit builds.
+      - name: Put the build next to the flasher page
+        run: cp out/* docs/flash/
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/
+
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
@@ -73,3 +97,17 @@ jobs:
             https://github.com/lvgl/lvgl managed_components/lvgl__lvgl
       - run: python3 sim/build.py
       - run: tools/regress.sh
+
+  # Publishes docs/ — the landing page and the web flasher — with the binaries
+  # this same run produced. Only from main: a pull request must not be able to
+  # replace what the public page serves.
+  pages:
+    needs: firmware
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4

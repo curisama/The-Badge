@@ -1019,13 +1019,33 @@ static void sync_task(void *arg)
      * works fine from a laptop).
      * try_task has said "an address is the standard" from the start; this is
      * the same rule, applied in the one place that skipped it. */
+    /* 🚨 The association does not always hold. Seen on hardware (09-13):
+     *     wifi:state: auth -> assoc (0x0)
+     *     wifi:state: assoc -> init (0x6c0)     <- dropped, 3 ms later
+     * and then nothing — `esp_wifi_connect()` is not retried by anyone, so the
+     * wait below ran its full budget for an address that could never arrive.
+     * Ask again when the link is not up. Two more tries, three seconds apart;
+     * beyond that it is not a hiccup and holding the radio only keeps the
+     * scan on the WiFi screen waiting. */
     esp_netif_ip_info_t ip = { 0 };
     bool addressed = false;
+    int  tries_left = 2, down_for = 0;
     for (int i = 0; i < 30; i++) {              /* up to 15 s */
         vTaskDelay(pdMS_TO_TICKS(500));
         if (nif && esp_netif_get_ip_info(nif, &ip) == ESP_OK && ip.ip.addr) {
             addressed = true;
             break;
+        }
+        wifi_ap_record_t ap;
+        if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+            down_for = 0;                       /* link is up, DHCP is working */
+            continue;
+        }
+        if (++down_for >= 6 && tries_left > 0) { /* three seconds with no link */
+            ESP_LOGW("net", "the link dropped — asking again (%d left)", tries_left);
+            tries_left--;
+            down_for = 0;
+            esp_wifi_connect();
         }
     }
     if (!addressed) {

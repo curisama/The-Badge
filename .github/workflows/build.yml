@@ -45,7 +45,7 @@ jobs:
           cp build/badge_fw.bin                    out/
           cat > out/manifest.json <<'JSON'
           {
-            "name": "AMOLED Badge",
+            "name": "The Badge",
             "version": "${{ github.ref_name }}",
             "new_install_prompt_erase": true,
             "builds": [{

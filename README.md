@@ -1,4 +1,4 @@
-# AMOLED Badge
+# The Badge
 
 Firmware for a round 466×466 AMOLED badge built on the Waveshare
 **ESP32-S3-Touch-AMOLED-1.75C** — the one in the milled aluminium case.

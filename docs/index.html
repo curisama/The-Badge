@@ -109,9 +109,14 @@ after that.</p>
   on <code>CONFIG_PM_ENABLE</code> or tickless idle, and the one example that
   shuts down the twelve unused AXP2101 rails is not the path the board support
   package takes &mdash; so a build started from them leaves the CPU awake and a
-  dozen regulators switching into nothing. Here the chip sleeps between frames
-  and two rails are left standing. With the screen off that took standby from
-  11.9 hours on a charge to 19.6.</span></li>
+  dozen regulators switching into nothing. Here the panel is really switched
+  off rather than covered, the chip light-sleeps between frames, and two rails
+  are left standing. Together those took standby from 11.9 hours on a charge to
+  19.6.
+  <br><small>Both of those are measurements of this firmware, before and after
+  that work &mdash; the firmware the board shipped with was never put on a
+  meter here. The claim about the examples is about their published source,
+  which anyone can check.</small></span></li>
 </ul>
 
 <h2>What it does</h2>

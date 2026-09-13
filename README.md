@@ -30,7 +30,9 @@ assistant and LLM chat the demos for this board are built around; the water,
 the orbs and the games are in because I like them. Power was the other reason:
 none of Waveshare's own ESP-IDF examples enable `CONFIG_PM_ENABLE` or tickless
 idle, and the example that shuts down the twelve unused AXP2101 rails is not
-the path the BSP takes. Doing both took standby from 11.9 hours to 19.6.
+the path the BSP takes. Switching the panel off for real, light sleep and those
+rails together took standby here from 11.9 hours to 19.6 — this firmware before
+and after that work, not a comparison against the one the board shipped with.
 
 <p align="center">
   <img src="docs/img/lock.png"  width="23%" alt="lock screen">

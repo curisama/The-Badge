@@ -18,7 +18,7 @@ commit builds.
 To publish: enable Pages for this repository with source **GitHub Actions**
 (not *Deploy from a branch* — that would serve `docs/` as it sits in git,
 without the binaries). The page is then at
-`https://<user>.github.io/amoled-badge/flash/`, rebuilt on every push to
+`https://<user>.github.io/The-Badge/flash/`, rebuilt on every push to
 `main`.
 
 🚨 The offsets in `manifest.json` are not decoration — they have to match

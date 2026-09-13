@@ -85,7 +85,7 @@
   <img class="shot hero-shot" src="img/home.png" alt="The home screen: six apps around a night-sky wallpaper">
   <div class="cta">
     <a class="btn fill" href="flash/">Flash it from your browser</a>
-    <a class="btn" href="https://github.com/curisama/amoled-badge">Source on GitHub</a>
+    <a class="btn" href="https://github.com/curisama/The-Badge">Source on GitHub</a>
   </div>
 </header>
 
@@ -315,15 +315,15 @@ cable; failing that, hold <b>BOOT</b>, tap <b>RESET</b>, release <b>BOOT</b>.</p
 <p>You need <a href="https://docs.espressif.com/projects/esp-idf/en/stable/esp32s3/get-started/">ESP-IDF
 5.5</a> and nothing else; every other dependency is fetched on the first
 build.</p>
-<pre><code>git clone https://github.com/curisama/amoled-badge
-cd amoled-badge
+<pre><code>git clone https://github.com/curisama/The-Badge
+cd The-Badge
 cp main/secrets.example.h main/secrets.h   # optional, may stay empty
 idf.py build
 idf.py -p /dev/ttyACM0 flash               # COMx on Windows</code></pre>
 <p><code>tools/setup.sh</code> does the same and works out which OS you are on.
 The first build pulls down roughly 20&nbsp;MB of components and takes a while;
 after that it is quick. Per-OS notes are in
-<a href="https://github.com/curisama/amoled-badge/blob/main/docs/SETUP.md">docs/SETUP.md</a>.</p>
+<a href="https://github.com/curisama/The-Badge/blob/main/docs/SETUP.md">docs/SETUP.md</a>.</p>
 
 <div class="warn">
   <p><b>Check the board first.</b> This is for the
@@ -353,8 +353,8 @@ PORT=8792 python3 sim/server.py   # then open http://localhost:8792</code></pre>
 
 <footer>
   <p>MIT licensed. Third-party components are listed in
-  <a href="https://github.com/curisama/amoled-badge/blob/main/NOTICE">NOTICE</a>;
+  <a href="https://github.com/curisama/The-Badge/blob/main/NOTICE">NOTICE</a>;
   none of them are redistributed here. The planet maps are NASA imagery — NASA
   does not endorse this project.</p>
-  <p><a href="https://github.com/curisama/amoled-badge">github.com/curisama/amoled-badge</a></p>
+  <p><a href="https://github.com/curisama/The-Badge">github.com/curisama/The-Badge</a></p>
 </footer>

@@ -23,7 +23,7 @@ git**. Those are all you have to bring.
 Most of what was built was checked this way — the water particles, the orb rotation, fonts, game logic.
 
 ```bash
-git clone https://github.com/curisama/amoled-badge && cd amoled-badge
+git clone https://github.com/curisama/The-Badge && cd The-Badge
 ./tools/setup.sh --sim-only        # fetch LVGL only and build the simulator
 python3 sim/server.py              # then open localhost:8791 in a browser
 ```
@@ -37,7 +37,7 @@ git clone --recursive https://github.com/espressif/esp-idf.git -b v5.5.5 ~/esp/e
 ~/esp/esp-idf/install.sh esp32s3
 . ~/esp/esp-idf/export.sh
 
-cd amoled-badge
+cd The-Badge
 cp main/secrets.example.h main/secrets.h   # fill in the password
 idf.py build
 idf.py -p /dev/ttyACM0 flash monitor       # COMx on Windows

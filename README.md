@@ -52,7 +52,7 @@ and after that work, not a comparison against the one the board shipped with.
 | **Calc** | A 4×4 grid loses its corners on a round screen, so the digits run in three columns down the middle and the operators take the flanks |
 | **Settings** | Brightness, sound, screen-off delay, time zone, Wi-Fi and Bluetooth pairing — every row carrying its own value so nothing is opened just to be read |
 
-More of them, with screenshots: **<https://curisama.github.io/amoled-badge/>**
+More of them, with screenshots: **<https://curisama.github.io/The-Badge/>**
 
 There is no cloud anything. WiFi comes up for one reason — setting the clock,
 and only once the clock has gone stale — plus the scan when you first pick a
@@ -63,7 +63,7 @@ network, which you do on the badge itself.
 If you only want the firmware on a board, there is a browser flasher — no
 toolchain, nothing to install:
 
-**<https://curisama.github.io/amoled-badge/flash/>**
+**<https://curisama.github.io/The-Badge/flash/>**
 
 It needs Chrome or Edge (WebSerial is not in Safari or Firefox). For those,
 grab the binaries from a release and use `esptool`; the page lists the
@@ -75,8 +75,8 @@ You need [ESP-IDF 5.5](https://docs.espressif.com/projects/esp-idf/en/stable/esp
 and nothing else; every other dependency is fetched for you on first build.
 
 ```sh
-git clone https://github.com/curisama/amoled-badge
-cd amoled-badge
+git clone https://github.com/curisama/The-Badge
+cd The-Badge
 cp main/secrets.example.h main/secrets.h   # optional, may stay empty
 idf.py build
 idf.py -p /dev/ttyACM0 flash               # COMx on Windows

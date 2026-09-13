@@ -32,6 +32,20 @@ echo "════ radio ════"
 has main/ble/hid_mouse.c "esp_hid_gap_deinit()" \
   && ok "bringing BLE down brings HID GAP down too (left up, it never comes back)" \
   || bad "esp_hid_gap_deinit is missing"
+# 🚨 Not looking at what xTaskCreate returned leaves the state stuck on "in
+#    progress" when it fails (which is when internal RAM is thin). The screen
+#    never leaves "looking around..." or "connecting...", and the latch stops
+#    that boot from even trying again (09-13).
+#    Do not count them — tasks come and go. The meaning is "if it was created,
+#    check that it was".
+python3 - <<'EOF' && ok "the radio tasks check that they were created" || bad "a radio task ignores what xTaskCreate returned"
+import re, sys
+src = open("main/port_esp.c", encoding="utf-8").read()
+miss = [m.group(1) for m in re.finditer(r'xTaskCreate\((\w+),\s*"(?:wifiscan|wifitry|timesync)"[^;]*;', src)
+        if "pdPASS" not in m.group(0) and "pdPASS" not in src[max(0, m.start()-80):m.start()]]
+if miss:
+    print("  not checked:", ", ".join(miss)); sys.exit(1)
+EOF
 
 echo "════ sound ════"
 has main/port_esp.c "tone_muted" \
@@ -502,6 +516,9 @@ EOF
 
 echo "════ does a long press survive the screen being rebuilt ════"
 python3 tools/sim-hold-check.py && ok "a long press still lands during a rebuild" || bad "the long press dies (deleting the pressed object makes LVGL ignore input until release)"
+
+echo "════ does the WiFi screen get stuck when no answer comes ════"
+python3 tools/sim-wifi-stall-check.py && ok "the scan screen finds its way out" || bad "the scan screen is stuck (asking again has no bound)"
 
 echo "════ do the home pages still turn ════"
 # 🚨 A gesture reaches only the pressed object. On 09-11 swapping the wallpaper

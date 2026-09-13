@@ -27,6 +27,20 @@
 
 static lv_obj_t   *s_scr, *s_list, *s_note;
 static lv_timer_t *s_poll;
+static uint32_t    s_wait_t0;              /* when the waiting started */
+static bool        s_stalled;              /* gave up waiting for an answer */
+
+/* 🚨 When the layer below never answers, the screen is stuck on
+ * "looking around..." forever. It happened (09-13): if the scan task cannot be
+ * created the result stays -1, and there was no bound here — it just asked
+ * again every 200 ms for ever. The way out existed (the back button), but
+ * coming back in landed on the same screen, and that boot could not scan again.
+ * The layer below is fixed, and the bound stays anyway: a radio is a thing that
+ * sometimes does not come back, and a screen has to leave a way out.
+ * For scale: a scan waits up to 8 s for its turn on the radio and then takes
+ * 3-4 s; a join is 8 s plus 15 s for an address. Neither reaches these. */
+#define SCAN_STALL_MS  20000
+#define TRY_STALL_MS   30000
 static char        s_pick[33];             /* the SSID being joined */
 static char        s_lastok[33];           /* last network that worked */
 static wifi_found_t s_found[WIFI_SCAN_MAX];
@@ -38,6 +52,7 @@ static void rescan_cb(lv_timer_t *t) { (void)t; show_scan(); }
 /* ── shared ───────────────────────────────────────────────── */
 static void clear_body(void)
 {
+    s_stalled = false;
     if (s_poll) { lv_timer_delete(s_poll); s_poll = NULL; }
     if (s_list) { lv_obj_delete(s_list); s_list = NULL; }
     if (s_note) { lv_obj_delete(s_note); s_note = NULL; }
@@ -54,12 +69,24 @@ static void note(const char *txt, uint32_t col)
     lv_label_set_text(s_note, txt);
 }
 
+/* No answer is coming - stop asking and give the person a way forward. */
+static void stall(const char *txt)
+{
+    if (s_poll) { lv_timer_delete(s_poll); s_poll = NULL; }
+    s_stalled = true;
+    note(txt, 0xE06A6A);
+}
+
 /* ── while joining ────────────────────────────────────────── */
 static void try_poll(lv_timer_t *t)
 {
     (void)t;
     int st = port_wifi_try_state();
-    if (st == WIFI_TRY_BUSY) return;
+    if (st == WIFI_TRY_BUSY) {
+        if (lv_tick_elaps(s_wait_t0) > TRY_STALL_MS)
+            stall("no answer - tap to retry");
+        return;
+    }
     lv_timer_delete(s_poll); s_poll = NULL;
 
     if (st == WIFI_TRY_OK) {
@@ -80,6 +107,7 @@ static void try_now(const char *ssid, const char *pass)
     clear_body();
     note("connecting...", 0xE0B33A);
     port_wifi_try(ssid, pass);
+    s_wait_t0 = lv_tick_get();
     s_poll = lv_timer_create(try_poll, 300, NULL);
 }
 
@@ -121,7 +149,11 @@ static void scan_poll(lv_timer_t *t)
 {
     (void)t;
     int n = port_wifi_scan_result(s_found, WIFI_SCAN_MAX);
-    if (n < 0) return;                          /* still scanning */
+    if (n < 0) {                                /* still scanning */
+        if (lv_tick_elaps(s_wait_t0) > SCAN_STALL_MS)
+            stall("scan stalled - tap to retry");
+        return;
+    }
     s_n = n;
     lv_timer_delete(s_poll); s_poll = NULL;
     if (s_note) { lv_obj_delete(s_note); s_note = NULL; }
@@ -188,7 +220,19 @@ static void show_scan(void)
     clear_body();
     note("looking around...", 0x6E7686);
     port_wifi_scan_start();
+    s_wait_t0 = lv_tick_get();
     s_poll = lv_timer_create(scan_poll, 200, NULL);
+}
+
+/* Once stalled, a tap on the background scans again.
+ * 🚨 It stays attached and only listens while stalled. Adding and removing the
+ * callback risks attaching it under a finger that is already down, and LVGL
+ * drops that whole press. */
+static void retry_cb(lv_event_t *e)
+{
+    (void)e;
+    if (!s_stalled) return;
+    show_scan();
 }
 
 /* ── open and close ───────────────────────────────────────── */
@@ -208,6 +252,7 @@ void wifi_setup_open(void)
     lv_obj_set_style_bg_color(s_scr, lv_color_hex(0x000000), 0);
     lv_obj_set_style_bg_opa(s_scr, LV_OPA_COVER, 0);
     lv_obj_add_flag(s_scr, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_scr, retry_cb, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *t = lv_label_create(s_scr);
     lv_label_set_text(t, "Wi-Fi");

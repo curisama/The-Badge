@@ -190,6 +190,13 @@ int port_wifi_scan_result(wifi_found_t *out, int max)
         { "neighbour-5G",  -71 }, { "cafe_guest",   -78 },
         { "printer-direct", -83 },
     };
+    /* 🚨 The simulator has to be able to make the answer never arrive. The
+     * device got stuck that way (09-13, the scan task could not be created),
+     * and whether the screen finds its way out cannot be told without pressing
+     * it. BADGE_SIM_SCAN_STALL=1 returns -1 for ever. */
+    static int stall = -1;
+    if (stall < 0) { const char *e = getenv("BADGE_SIM_SCAN_STALL"); stall = e && *e == '1'; }
+    if (stall) return -1;
     if (!s_scan_on || lv_tick_get() - s_scan_t0 < 1000) return -1;
     int n = (int)(sizeof FAKE / sizeof FAKE[0]);
     if (n > max) n = max;

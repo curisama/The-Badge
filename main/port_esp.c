@@ -677,7 +677,17 @@ void port_wifi_scan_start(void)
     if (s_scan_busy) return;
     s_scan_busy = true;
     s_scan_n = -1;
-    xTaskCreate(scan_task, "wifiscan", 4096, NULL, 4, NULL);
+    /* 🚨 Check that the task was actually created. Internal RAM runs thin
+     * (it is down to 22 KB while the clock sync holds WiFi), and xTaskCreate
+     * takes the TCB and the 4 KB stack from it. When it fails, s_scan_n stays
+     * -1 ("still scanning") and s_scan_busy latches true — the screen never
+     * leaves "looking around..." and no later scan runs either, until a
+     * reboot. Answer "nothing found" and release the latch instead. */
+    if (xTaskCreate(scan_task, "wifiscan", 4096, NULL, 4, NULL) != pdPASS) {
+        ESP_LOGE("wifi", "could not create the scan task - out of internal RAM");
+        s_scan_n = 0;
+        s_scan_busy = false;
+    }
 }
 
 int port_wifi_scan_result(wifi_found_t *out, int max)
@@ -762,7 +772,13 @@ void port_wifi_try(const char *ssid, const char *pass)
     }
     s_try_busy = true;
     s_try_state = WIFI_TRY_BUSY;
-    xTaskCreate(try_task, "wifitry", 4096, NULL, 4, NULL);
+    /* 🚨 Same place as the scan: without this the state stays WIFI_TRY_BUSY
+     * and "connecting..." never ends. */
+    if (xTaskCreate(try_task, "wifitry", 4096, NULL, 4, NULL) != pdPASS) {
+        ESP_LOGE("wifi", "could not create the join task - out of internal RAM");
+        s_try_state = WIFI_TRY_FAIL;
+        s_try_busy = false;
+    }
 }
 
 int port_wifi_try_state(void) { return s_try_state; }
@@ -1035,7 +1051,10 @@ void port_time_sync_start(void)
     /* With no credentials on the badge there is nowhere to go */
     if (!badge_creds_wifi_any()) { s_net = NET_NOCONF; return; }
     if (s_net == NET_CONNECTING) return;
-    xTaskCreate(sync_task, "timesync", 4096, NULL, 4, NULL);
+    /* 🚨 The same check here. A missing clock sync does not hold the screen,
+     * but it is better named in the log than silently absent. */
+    if (xTaskCreate(sync_task, "timesync", 4096, NULL, 4, NULL) != pdPASS)
+        ESP_LOGE("net", "could not create the time sync task - out of internal RAM");
 }
 
 /* The 1.75C has no RTC chip — losing power loses the time. (The plain 1.75

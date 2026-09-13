@@ -24,8 +24,8 @@ WIFI_ROW = (233, 246)      # the Wi-Fi row, after the settings list is dragged u
 NOTE     = (233, 233)      # the middle, where the note sits
 
 
-def run():
-    env = dict(os.environ, BADGE_SIM_SCAN_STALL="1")
+def run(var, wait_ms, want):
+    env = dict(os.environ, **{var: "1"})
     p = subprocess.Popen([SIM, "--serve"], stdin=subprocess.PIPE,
                          stdout=subprocess.PIPE, stderr=ERR, cwd=D, env=env)
 
@@ -62,10 +62,12 @@ def run():
             send("T %d %d 1\n" % (x, y0 + (y1 - y0) * i // n)); step(40)
         send("T %d %d 0\n" % (x, y1)); step(300)
 
-    def red_at(buf, xy):
+    def hue_at(buf, xy):
         i = (xy[1] * 466 + xy[0]) * 3
         r, g, b = buf[i], buf[i + 1], buf[i + 2]
-        return r > 120 and r > g + 40 and r > b + 40
+        if r > 180 and g > 140 and b < 110:      return "amber"   # radio busy
+        if r > 120 and r > g + 40 and r > b + 40: return "red"    # stalled
+        return None
 
     step(800)
     send("K 0\n"); step(400)
@@ -73,21 +75,26 @@ def run():
     drag(233, 380, 140)
     tap(*WIFI_ROW)
 
-    # Run past the 20 s bound. Stuck means the grey "looking around..." is still there.
-    step(24000, chunk=200)
+    step(wait_ms, chunk=200)
     buf = frame()
-    # Red text on the note line means it found its way out.
-    row = any(red_at(buf, (x, NOTE[1])) for x in range(80, 390, 2))
+    seen = {hue_at(buf, (x, NOTE[1])) for x in range(80, 390, 2)} - {None}
     send("Q\n")
     try:
         p.wait(timeout=5)
     except Exception:
         p.kill()
-    return row
+    return want in seen
 
 
-if run():
-    print("  it leaves the screen even with no answer (and says to try again)")
-    sys.exit(0)
-print("  * stuck on the scan screen - no way out when no answer comes")
-sys.exit(1)
+bad = 0
+# No answer ever: past the 20 s bound the screen has to stop asking and say so.
+if run("BADGE_SIM_SCAN_STALL", 24000, "red"):
+    print("  no answer at all  → it leaves the screen and says to try again")
+else:
+    print("  * no answer at all  → stuck on the scan screen"); bad += 1
+# The radio held elsewhere: that is not an empty neighbourhood, and it retries.
+if run("BADGE_SIM_SCAN_BUSY", 6000, "amber"):
+    print("  radio held elsewhere → it says the radio is busy and retries")
+else:
+    print("  * radio held elsewhere → it does not say so (it used to claim 'nothing around')"); bad += 1
+sys.exit(1 if bad else 0)

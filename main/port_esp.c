@@ -624,7 +624,8 @@ static void scan_task(void *arg)
 {
     (void)arg;
     int found = 0;
-    if (badge_wifi_take(8000)) {
+    bool got_radio = badge_wifi_take(8000);
+    if (got_radio) {
         esp_netif_t *nif = badge_wifi_netif_once();
         (void)nif;
         wifi_init_config_t ic = WIFI_INIT_CONFIG_DEFAULT();
@@ -666,8 +667,12 @@ static void scan_task(void *arg)
         }
         badge_wifi_give();
     }
-    ESP_LOGI("wifi", "scan finished — %d networks", found);
-    s_scan_n = found;
+    if (got_radio) {
+        ESP_LOGI("wifi", "scan finished — %d networks", found);
+    } else {
+        ESP_LOGW("wifi", "the radio was busy for 8 s — no scan happened");
+    }
+    s_scan_n = got_radio ? found : WIFI_SCAN_NO_RADIO;
     s_scan_busy = false;
     vTaskDelete(NULL);
 }
@@ -693,7 +698,7 @@ void port_wifi_scan_start(void)
 int port_wifi_scan_result(wifi_found_t *out, int max)
 {
     int n = s_scan_n;
-    if (n < 0) return -1;
+    if (n < 0) return n;                    /* running, or never got the radio */
     if (n > max) n = max;
     memcpy(out, s_scan, n * sizeof(wifi_found_t));
     return n;
@@ -971,7 +976,7 @@ static void sync_task(void *arg)
     s_net = NET_CONNECTING;
     char ss[33] = "", pw[65] = "";
 
-    badge_wifi_netif_once();
+    esp_netif_t *nif = badge_wifi_netif_once();
 
     wifi_init_config_t ic = WIFI_INIT_CONFIG_DEFAULT();
     /* 🚨 Trying to bring it down when it never came up leaves two lines of
@@ -1004,6 +1009,38 @@ static void sync_task(void *arg)
     esp_wifi_connect();
     ESP_LOGI("net", "joining WiFi");
 
+    /* 🚨 Wait for an address before asking for the time. The join is not what
+     * makes a network usable — the address is, and it arrives about two
+     * seconds after the link comes up. SNTP used to be started right here, at
+     * the moment of esp_wifi_connect(), so its first request went out with no
+     * route: no answer came back, and the twenty-second budget below was spent
+     * on retries of a question nobody could hear (09-13: joined at 5.5 s,
+     * address at 7.3 s, "clock sync failed" at 25.5 s on a network where NTP
+     * works fine from a laptop).
+     * try_task has said "an address is the standard" from the start; this is
+     * the same rule, applied in the one place that skipped it. */
+    esp_netif_ip_info_t ip = { 0 };
+    bool addressed = false;
+    for (int i = 0; i < 30; i++) {              /* up to 15 s */
+        vTaskDelay(pdMS_TO_TICKS(500));
+        if (nif && esp_netif_get_ip_info(nif, &ip) == ESP_OK && ip.ip.addr) {
+            addressed = true;
+            break;
+        }
+    }
+    if (!addressed) {
+        ESP_LOGW("net", "joined but no address — giving up on the clock");
+        s_net = NET_FAIL;
+        esp_wifi_disconnect();
+        esp_wifi_stop();
+        esp_wifi_deinit();
+        ESP_LOGI("net", "clock sync failed");
+        badge_wifi_give();
+        vTaskDelete(NULL);
+        return;
+    }
+    ESP_LOGI("net", "address " IPSTR " — asking for the time", IP2STR(&ip.ip));
+
     /* 🚨 Success used to be judged as "the clock reads later than 2023". But
      * if a (wrong) time is already set at boot, that is **true on the first
      * check** — it declared success before NTP had answered and switched SNTP
@@ -1020,11 +1057,15 @@ static void sync_task(void *arg)
     esp_sntp_init();
 
     time_t before = time(NULL);
-    /* Wait up to twenty seconds, then give up and switch the radio off. */
+    /* Wait up to twenty seconds, then give up and switch the radio off.
+     * 🚨 The count starts here, after the address — not at the join. */
+    uint32_t t0 = xTaskGetTickCount();
     for (int i = 0; i < 40; i++) {
         vTaskDelay(pdMS_TO_TICKS(500));
         if (s_sntp_done) break;
     }
+    ESP_LOGI("net", "waited %lu ms for the time",
+             (unsigned long)((xTaskGetTickCount() - t0) * portTICK_PERIOD_MS));
     s_net = s_sntp_done ? NET_SYNCED : NET_FAIL;
     if (s_sntp_done) {
         /* Record how far off it was — the error from mis-counting sleep shows

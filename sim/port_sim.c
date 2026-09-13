@@ -196,7 +196,11 @@ int port_wifi_scan_result(wifi_found_t *out, int max)
      * it. BADGE_SIM_SCAN_STALL=1 returns -1 for ever. */
     static int stall = -1;
     if (stall < 0) { const char *e = getenv("BADGE_SIM_SCAN_STALL"); stall = e && *e == '1'; }
-    if (stall) return -1;
+    if (stall) return WIFI_SCAN_RUNNING;
+    /* BADGE_SIM_SCAN_BUSY=1 stands in for the radio being held elsewhere. */
+    static int busy = -1;
+    if (busy < 0) { const char *e = getenv("BADGE_SIM_SCAN_BUSY"); busy = e && *e == '1'; }
+    if (busy) return WIFI_SCAN_NO_RADIO;
     if (!s_scan_on || lv_tick_get() - s_scan_t0 < 1000) return -1;
     int n = (int)(sizeof FAKE / sizeof FAKE[0]);
     if (n > max) n = max;

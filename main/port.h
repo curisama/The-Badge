@@ -115,7 +115,13 @@ bool        port_hid_peer_addr(uint8_t out[6]);
 #define WIFI_SCAN_MAX 16
 typedef struct { char ssid[33]; int8_t rssi; uint8_t saved; } wifi_found_t;
 void        port_wifi_scan_start(void);
-/* -1 = still scanning, >= 0 = how many were found */
+/* WIFI_SCAN_RUNNING = still scanning, WIFI_SCAN_NO_RADIO = never got the
+ * radio, >= 0 = how many were found.
+ * 🚨 "never got the radio" is not "nothing is around". Both used to come back
+ * as 0 and the screen said "nothing around" — a flat lie when the clock sync
+ * had the radio and the scan waited its eight seconds for nothing. */
+#define WIFI_SCAN_RUNNING   (-1)
+#define WIFI_SCAN_NO_RADIO  (-2)
 int         port_wifi_scan_result(wifi_found_t *out, int max);
 
 /* Write and clear slots (0-2). Called from the UI. */

@@ -149,6 +149,19 @@ static void scan_poll(lv_timer_t *t)
 {
     (void)t;
     int n = port_wifi_scan_result(s_found, WIFI_SCAN_MAX);
+    /* 🚨 Never getting the radio is not an empty neighbourhood. The clock sync
+     * holds it for a few seconds after a boot or a plug-in, and a scan that
+     * runs into that waits its eight seconds and comes back with nothing.
+     * Saying "nothing around" there sends the person looking for a fault in
+     * their router. Say what actually happened, and try again by itself —
+     * the radio is about to be free. */
+    if (n == WIFI_SCAN_NO_RADIO) {
+        if (s_poll) { lv_timer_delete(s_poll); s_poll = NULL; }
+        note("radio busy - retrying", 0xE0B33A);
+        s_poll = lv_timer_create(rescan_cb, 1500, NULL);
+        lv_timer_set_repeat_count(s_poll, 1);
+        return;
+    }
     if (n < 0) {                                /* still scanning */
         if (lv_tick_elaps(s_wait_t0) > SCAN_STALL_MS)
             stall("scan stalled - tap to retry");

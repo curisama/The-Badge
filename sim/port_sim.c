@@ -368,6 +368,7 @@ int port_hid_interval_ms(void) { return 15; }
 void port_big_free(void *p) { free(p); }
 
 void port_pm_hold(bool on) { (void)on; }
+void port_perf_hold(bool on) { (void)on; }   /* the simulator has one speed */
 
 void port_battery_journal_dump(void) {}
 

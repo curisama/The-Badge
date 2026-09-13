@@ -128,6 +128,31 @@ void port_pm_hold(bool on)
     }
 }
 
+/* ── the top-speed lock ──────────────────────────────────
+ * 🚨 Keeping the chip awake and running it fast are **two different locks.**
+ * NO_LIGHT_SLEEP above only stops it sleeping; it does not take a waking CPU
+ * from 80 MHz to 240. Dynamic frequency scaling parks at min_freq whenever
+ * nobody holds a CPU_FREQ_MAX lock, and it never raises the clock because the
+ * work looks heavy. So an app where the arithmetic *is* the frame — the water
+ * — has been running at a third of the chip's speed all along.
+ *
+ * Held only while such an app is open. Holding it always would just burn
+ * battery. Nesting is fine. */
+static esp_pm_lock_handle_t s_fast;
+static int                  s_fast_n;
+
+void port_perf_hold(bool on)
+{
+    if (!s_fast) {
+        if (esp_pm_lock_create(ESP_PM_CPU_FREQ_MAX, 0, "badge-fast", &s_fast) != ESP_OK) return;
+    }
+    if (on) {
+        if (s_fast_n++ == 0) esp_pm_lock_acquire(s_fast);
+    } else if (s_fast_n > 0) {
+        if (--s_fast_n == 0) esp_pm_lock_release(s_fast);
+    }
+}
+
 static void home_btn_task(void *arg)
 {
     (void)arg;

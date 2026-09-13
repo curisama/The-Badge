@@ -496,8 +496,26 @@ int main(int argc, char **argv)
     lv_tick_set_cb(tick_cb);
 
     lv_display_t *disp = lv_display_create(W, H);
+    /* 🚨 The device draws in 24-row bands (display.c, buffer_height = 24) and
+     * the simulator used to draw the whole screen in one go. Anything that
+     * gets a band boundary wrong was therefore invisible here and only showed
+     * up after flashing — which is exactly the class of bug that is hardest to
+     * find. Same band height, same render mode, same bugs.
+     *
+     * SIM_FULL_REFRESH=1 puts the old whole-screen buffer back if something
+     * ever needs comparing against it. */
+    #define BAND_H 24
     static uint8_t draw_buf[W * H * 2];
-    lv_display_set_buffers(disp, draw_buf, NULL, sizeof(draw_buf), LV_DISPLAY_RENDER_MODE_FULL);
+    {
+        const char *fr = getenv("SIM_FULL_REFRESH");
+        if (fr && *fr != '0') {
+            lv_display_set_buffers(disp, draw_buf, NULL, sizeof(draw_buf),
+                                   LV_DISPLAY_RENDER_MODE_FULL);
+        } else {
+            lv_display_set_buffers(disp, draw_buf, NULL, W * BAND_H * 2,
+                                   LV_DISPLAY_RENDER_MODE_PARTIAL);
+        }
+    }
     lv_display_set_flush_cb(disp, flush_cb);
 
     lv_indev_t *indev = lv_indev_create();

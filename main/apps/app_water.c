@@ -57,6 +57,7 @@
 #  define MALLOC_CAP_INTERNAL 0
 #  define MALLOC_CAP_8BIT 0
 static void *heap_caps_malloc(size_t n, int caps) { (void)caps; return malloc(n); }
+static void *heap_caps_calloc(size_t n, size_t sz, int caps) { (void)caps; return calloc(n, sz); }
 static void  heap_caps_free(void *p) { free(p); }
 static int64_t esp_timer_get_time(void)
 {
@@ -136,6 +137,23 @@ static struct {
 static volatile bool s_still_flag;
 
 static void fluid_step(float dt, float gx, float gy);
+/* 🚨 Insurance, not a fix. Dynamic frequency scaling parks the CPU at min_freq
+ * when nobody holds a CPU_FREQ_MAX lock, which would leave an app whose
+ * arithmetic is the frame running at a third speed. But measured on hardware
+ * 09-12 the chip was already at 240 MHz before the water opened — something
+ * inside IDF holds it — and taking the lock changed no frame time at all. It
+ * earns its keep the day that something goes away. Recorded because it was
+ * written on the assumption that the clock was low, and that assumption was
+ * wrong. */
+static bool s_fast_held;
+
+static void water_fast(bool on)
+{
+    if (on == s_fast_held) return;
+    s_fast_held = on;
+    port_perf_hold(on);
+}
+
 static bool water_is_still(void);
 
 /* One step. Does the same thing whichever core calls it. */
@@ -195,6 +213,7 @@ static void phys_wait(void) { }
 /* The neighbour grid — each particle looks at its own cell and the eight around it */
 #define GC      24                      /* cells per side */
 #define GS      (466.0f / GC)            /* cell size (about 19 px) */
+#define INV_GS  ((float)GC / 466.0f)     /* multiply, never divide — see frsqrt above */
 static uint16_t s_head[GC * GC];        /* first particle per cell (0xFFFF = empty) — 1.1 KB, kept static */
 static uint16_t *s_next;                /* next particle in the same cell */
 
@@ -221,7 +240,7 @@ static void grid_build_from_current(void)
 {
     memset(s_head, 0xFF, sizeof s_head);
     for (int i = 0; i < NP; i++) {
-        int cx = (int)(s_x[i] / GS), cy = (int)(s_y[i] / GS);
+        int cx = (int)(s_x[i] * INV_GS), cy = (int)(s_y[i] * INV_GS);
         if (cx < 0) cx = 0;
         if (cx >= GC) cx = GC - 1;
         if (cy < 0) cy = 0;
@@ -233,13 +252,33 @@ static void grid_build_from_current(void)
 }
 
 /* Put it back inside the bowl */
+/* 🚨 This chip has no divide or square-root hardware. `a / b`, `a / 6.0f` and
+ * sqrtf all compile to a library call (__divsf3, sqrtf) — counted in the
+ * simulator, one frame did 33,074 divides in the density loop alone and 37,653
+ * sqrt-plus-divides in the neighbour loop. So:
+ *   1) every divide by a constant becomes a multiply by its reciprocal (INV_*)
+ *   2) 1/sqrt gets an approximation that calls nothing
+ *
+ * Two Newton steps leave about 5e-6 of relative error, which physics at this
+ * scale cannot feel. Every caller guards its input away from zero first. */
+static inline float frsqrt(float x)
+{
+    union { float f; uint32_t u; } c;
+    float xh = 0.5f * x;
+    c.f = x;
+    c.u = 0x5f3759dfu - (c.u >> 1);   /* halve the exponent for a first guess */
+    float y = c.f;
+    y = y * (1.5f - xh * y * y);
+    y = y * (1.5f - xh * y * y);
+    return y;
+}
+
 static inline void clamp_circle(float *x, float *y)
 {
     float dx = *x - CX, dy = *y - CY;
     float d2 = dx * dx + dy * dy;
     if (d2 > (float)(R - 2) * (R - 2)) {
-        float d = sqrtf(d2);
-        float k = (R - 2) / d;
+        float k = (R - 2) * frsqrt(d2);
         *x = CX + dx * k;
         *y = CY + dy * k;
     }
@@ -284,7 +323,7 @@ static void neighbors_relax(float dt)
     float dt2 = dt * dt;
     for (int i = 0; i < NP; i++) {
         float rho = 0, rhon = 0;
-        int cx = (int)(s_x[i] / GS), cy = (int)(s_y[i] / GS);
+        int cx = (int)(s_x[i] * INV_GS), cy = (int)(s_y[i] * INV_GS);
         int nb = 0;
 
         /* ── first walk: count density and collect the neighbours ── */
@@ -302,7 +341,7 @@ static void neighbors_relax(float dt)
                     /* 🚨 Division is about twenty cycles on Xtensa. HR is
                      * constant so it becomes a multiply, and 1/r is computed
                      * once and used for both axes. */
-                    float inv_r = 1.0f / sqrtf(r2);
+                    float inv_r = frsqrt(r2);
                     float r = r2 * inv_r;
                     float q = 1.0f - r * INV_HR;
                     rho  += q * q;
@@ -348,7 +387,7 @@ static void fluid_step(float dt, float gx, float gy)
      * breaking into pieces. */
     grid_build_from_current();
     for (int i = 0; i < NP; i++) {
-        int cx = (int)(s_x[i] / GS), cy = (int)(s_y[i] / GS);
+        int cx = (int)(s_x[i] * INV_GS), cy = (int)(s_y[i] * INV_GS);
         for (int oy = -1; oy <= 1; oy++) {
             int yy = cy + oy;
             if (yy < 0 || yy >= GC) continue;
@@ -360,7 +399,7 @@ static void fluid_step(float dt, float gx, float gy)
                     float dx = s_x[j] - s_x[i], dy = s_y[j] - s_y[i];
                     float r2 = dx * dx + dy * dy;
                     if (r2 >= HR2 || r2 < 1e-4f) continue;
-                    float inv_r = 1.0f / sqrtf(r2);
+                    float inv_r = frsqrt(r2);
                     float ux = dx * inv_r, uy = dy * inv_r;
                     float vr = (s_vx[i] - s_vx[j]) * ux + (s_vy[i] - s_vy[j]) * uy;
                     if (vr <= 0) continue;            /* only when approaching */
@@ -411,7 +450,7 @@ static void fluid_step(float dt, float gx, float gy)
          * makes 1300 the floor. This is a net for runaway values, not a
          * weight control. */
         if (sp2 > 1300.0f * 1300.0f) {    /* too fast and it jumps past its neighbours and tears */
-            float k = 1300.0f / sqrtf(sp2);
+            float k = 1300.0f * frsqrt(sp2);
             s_vx[i] *= k; s_vy[i] *= k;
         }
     }
@@ -437,12 +476,19 @@ static float shake_curve(float v)
 #define COLW 6                          /* width of a scan column */
 #define NCOL (466 / COLW + 1)
 #define ROWH 6
+#define INV_COLW (1.0f / COLW)
+#define INV_ROWH (1.0f / ROWH)
 #define NROW (466 / ROWH + 1)
 static uint8_t (*s_dens)[NCOL];
 static uint8_t (*s_chur)[NCOL];   /* how agitated the water is there — drives the foam */
 
 /* Runs of water per column. Up to three, so a detached blob is caught separately. */
-#define SPANS 3
+/* 🚨 Three was not enough. A few specks of spray floating above the water
+ * filled the list, and the body underneath was then never scanned at all —
+ * a black vertical stripe down the column (2,394 of them in 400 simulator
+ * frames). Six, and when even that runs out the last span swallows the rest
+ * instead of the scan giving up. */
+#define SPANS 6
 static int16_t (*s_sp0)[SPANS], (*s_sp1)[SPANS];
 static uint8_t *s_spn;
 static uint8_t *s_sfrac;    /* what fraction of the pixel the surface covers — softens the edge */
@@ -459,6 +505,13 @@ static lv_image_dsc_t s_img_dsc;
 /* Where the water was last frame. Clearing only that avoids touching all
  * 434 KB. 🚨 draw_cb comes before paint_img, so the declaration lives here. */
 static int s_img_y0 = 0, s_img_y1 = 465;
+/* 🚨 Per column, the vertical range the water covered last frame. Clearing is
+ * cut down to this — paint_img()'s clearing comment says why. p0 > p1 means
+ * the column was empty. */
+static int16_t *s_pv0, *s_pv1;
+/* The rectangle the boat took last frame. It sails above the water too, so it
+ * has to be remembered separately. */
+static int s_bx0 = 1, s_bx1 = 0, s_by0 = 1, s_by1 = 0;
 static lv_image_dsc_t s_img_strip;
 static uint16_t s_depth_lut[201];   /* depth below the surface, in pixels -> colour */
 
@@ -478,7 +531,7 @@ static void depth_lut_build(void)
 static float dens_at(float fx, int r)
 {
     if (r < 0 || r >= NROW) return 0;
-    float c = fx / COLW;
+    float c = fx * INV_COLW;
     int   ci = (int)c;
     float t = c - ci;
     if (ci < 0) { ci = 0; t = 0; }
@@ -495,7 +548,7 @@ static void build_spans(void)
     memset(s_dens, 0, (size_t)NROW * NCOL);
     memset(s_chur, 0, (size_t)NROW * NCOL);
     for (int i = 0; i < NP; i++) {
-        int c = (int)(s_rx[i] / COLW), r = (int)(s_ry[i] / ROWH);
+        int c = (int)(s_rx[i] * INV_COLW), r = (int)(s_ry[i] * INV_ROWH);
         /* Where the fast particles gather is where it breaks — that is where foam appears */
         float sp = fabsf(s_rvx[i]) + fabsf(s_rvy[i]);
         int ch = (int)(sp * 0.35f);
@@ -519,7 +572,10 @@ static void build_spans(void)
         int n = 0;
         float prev = dens_at(x, 0);
         int   topr = -1; float topf = 0;
-        for (int r = 1; r < NROW && n < SPANS; r++) {
+        /* 🚨 This used to stop scanning once the list was full (n == SPANS),
+         * which is what produced the black stripes. Scan to the bottom always;
+         * if there is no room left, stretch the last span to swallow it. */
+        for (int r = 1; r < NROW; r++) {
             float d = dens_at(x, r);
             bool was = prev >= THRESH, now = d >= THRESH;
             if (!was && now) {                      /* water starts here */
@@ -533,17 +589,24 @@ static void build_spans(void)
                 }
             } else if (was && !now && topr >= 0) {   /* and ends here */
                 float f = (prev - THRESH) / (prev - d + 1e-6f);
-                s_sp0[x][n] = (int16_t)((topr + topf) * ROWH);
-                s_sp1[x][n] = (int16_t)((r - 1 + f) * ROWH);
-                if (s_sp1[x][n] > s_sp0[x][n]) n++;
+                int16_t y0 = (int16_t)((topr + topf) * ROWH);
+                int16_t y1 = (int16_t)((r - 1 + f) * ROWH);
+                if (y1 > y0) {
+                    if (n < SPANS) { s_sp0[x][n] = y0; s_sp1[x][n] = y1; n++; }
+                    else           { s_sp1[x][SPANS - 1] = y1; }
+                }
                 topr = -1;
             }
             prev = d;
         }
-        if (topr >= 0 && n < SPANS) {
-            s_sp0[x][n] = (int16_t)((topr + topf) * ROWH);
-            s_sp1[x][n] = 465;
-            n++;
+        if (topr >= 0) {                             /* water all the way down */
+            if (n < SPANS) {
+                s_sp0[x][n] = (int16_t)((topr + topf) * ROWH);
+                s_sp1[x][n] = 465;
+                n++;
+            } else {
+                s_sp1[x][SPANS - 1] = 465;
+            }
         }
         s_spn[x] = (uint8_t)n;
 
@@ -680,7 +743,7 @@ static void fill_tri(float x0, float y0, float x1, float y1,
 }
 
 /* Paint the boat at its current attitude and return the rows it occupied. */
-static void paint_boat(int *out_y0, int *out_y1)
+static void paint_boat(int *out_x0, int *out_x1, int *out_y0, int *out_y1)
 {
     float bx = s_boat_x, by = s_boat_y;
     float bdeg = 0;
@@ -716,10 +779,10 @@ static void paint_boat(int *out_y0, int *out_y1)
     }
     float bc = cosf(bdeg * DEG2RAD), bs = sinf(bdeg * DEG2RAD);
 
-    int lo = 465, hi = 0;
+    int lo = 465, hi = 0, xlo = 465, xhi = 0;
     #define BX(px, py) (bx + (px) * bc - (py) * bs)
     #define BY(px, py) (by + (px) * bs + (py) * bc)
-    #define TRI(c, ax, ay, bx_, by_, cx, cy) do {         float _y0 = BY(ax, ay), _y1 = BY(bx_, by_), _y2 = BY(cx, cy);         fill_tri(BX(ax, ay), _y0, BX(bx_, by_), _y1, BX(cx, cy), _y2, (c));         float _lo = fminf(_y0, fminf(_y1, _y2)), _hi = fmaxf(_y0, fmaxf(_y1, _y2));         if ((int)_lo < lo) lo = (int)_lo;         if ((int)_hi + 1 > hi) hi = (int)_hi + 1;     } while (0)
+    #define TRI(c, ax, ay, bx_, by_, cx, cy) do {         float _y0 = BY(ax, ay), _y1 = BY(bx_, by_), _y2 = BY(cx, cy);         float _x0 = BX(ax, ay), _x1 = BX(bx_, by_), _x2 = BX(cx, cy);         fill_tri(_x0, _y0, _x1, _y1, _x2, _y2, (c));         float _lo = fminf(_y0, fminf(_y1, _y2)), _hi = fmaxf(_y0, fmaxf(_y1, _y2));         if ((int)_lo < lo) lo = (int)_lo;         if ((int)_hi + 1 > hi) hi = (int)_hi + 1;         float _xl = fminf(_x0, fminf(_x1, _x2)), _xh = fmaxf(_x0, fmaxf(_x1, _x2));         if ((int)_xl < xlo) xlo = (int)_xl;         if ((int)_xh + 1 > xhi) xhi = (int)_xh + 1;     } while (0)
     /* 🚨 A dark silhouette disappeared against deep water. The hull is lifted
      * to a wood tone and the outline is a shade brighter still. */
     const uint16_t HULL  = RGB565(0xB0, 0x70, 0x3C), HULL2 = RGB565(0xE0, 0xA4, 0x68);
@@ -742,9 +805,41 @@ static void paint_boat(int *out_y0, int *out_y1)
     #undef BX
     if (lo < 0) lo = 0;
     if (hi > 465) hi = 465;
+    if (xlo < 0) xlo = 0;
+    if (xhi > 465) xhi = 465;
+    *out_x0 = xlo;  *out_x1 = xhi;
     *out_y0 = lo;
     *out_y1 = hi;
 }
+
+#ifdef BADGE_SIM
+/* ── checking that the clearing is right (simulator only) ────
+ * Dropping the memset for "clear only what changed" means one missed spot
+ * leaves a pixel that should have gone — and that is invisible to the eye in a
+ * picture of sloshing water. So the meaning is checked directly: **any pixel
+ * that is not black and is outside what was painted this frame is last frame's
+ * leftover.**
+ *   WATER_VERIFY=1 ./badge_sim --serve
+ * turns it on. It is slow, so it is off by default. */
+static void paint_verify(void)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("WATER_VERIFY"); on = (e && *e != '0'); }
+    if (!on) return;
+    int bad = 0, bx = 0, by = 0;
+    for (int x = 0; x < 466 && !bad; x++) {
+        for (int y = 0; y < 466; y++) {
+            if (!s_img[(size_t)y * 466 + x]) continue;
+            if (x >= s_bx0 && x <= s_bx1 && y >= s_by0 && y <= s_by1) continue;
+            bool in = false;
+            for (int k = 0; k < s_spn[x]; k++)
+                if (y >= s_sp0[x][k] && y <= s_sp1[x][k]) { in = true; break; }
+            if (!in) { bad++; bx = x; by = y; break; }
+        }
+    }
+    if (bad) ESP_LOGW("water", "leftover pixel (%d,%d) — the clearing missed a spot", bx, by);
+}
+#endif
 
 /* ── filling in the water image ───────────────────────────────
  * The runs (s_sp0/s_sp1) were already worked out by step(). This only writes
@@ -753,21 +848,67 @@ static void paint_boat(int *out_y0, int *out_y1)
 static void paint_img(void)
 {
     if (!s_img) return;
-    /* 🚨 memset-ing 434 KB and handing over the full 466x466 every frame is
-     * waste. The water is usually in the lower half. Clear only what was drawn
-     * last time and hand over only what was drawn this time (much of 78 ms of
-     * drawing was spent on area that was never used). */
-    memset(s_img + (size_t)s_img_y0 * 466, 0,
-           (size_t)(s_img_y1 - s_img_y0 + 1) * 466 * 2);
+    /* 🚨 Clearing the band the water was in was already an improvement over
+     * 434 KB, and it is still far too much. This cache is write-allocate: a
+     * store to a line that is not resident *reads* it from PSRAM first. So a
+     * memset over 300 rows reads 280 KB, writes 280 KB, and then the water is
+     * painted over the top of it — the whole cost of touching the same place
+     * twice is waste.
+     *
+     * So there is no memset at all. Only what actually changed is cleared:
+     *   - per column, where the water was last frame minus where it is now
+     *   - the gaps between this frame's runs (between separated droplets)
+     *   - the rectangle the boat was in last frame
+     * The runs themselves are repainted in full every frame, so clearing those
+     * three keeps the picture exact. The surface moves a few pixels a frame, so
+     * the clearing drops from 280 KB to a few KB.
+     *
+     * 🚨 s_img therefore has to be calloc'd — with no memset, anywhere that is
+     * never painted goes out with whatever it was allocated with. */
     int ny0 = 465, ny1 = 0;
+
+    /* Clear the rectangle the boat was in. Anywhere the water covered gets
+     * repainted below anyway. */
+    if (s_bx0 <= s_bx1 && s_by0 <= s_by1) {
+        size_t w = (size_t)(s_bx1 - s_bx0 + 1) * 2;
+        for (int y = s_by0; y <= s_by1; y++)
+            memset(s_img + (size_t)y * 466 + s_bx0, 0, w);
+        if (s_by0 < ny0) ny0 = s_by0;
+        if (s_by1 > ny1) ny1 = s_by1;
+    }
+
+    /* Per column, clear where the water has left. Inside this frame's runs is
+     * painted over shortly, so it is left alone. */
+    for (int x = 0; x < 466; x++) {
+        int p0 = s_pv0[x], p1 = s_pv1[x];
+        int nsp = s_spn[x];
+        int n0 = nsp ? s_sp0[x][0] : 1, n1 = nsp ? s_sp1[x][nsp - 1] : 0;
+        if (p0 <= p1) {
+            int a1 = p1 < n0 - 1 ? p1 : n0 - 1;        /* above the new water */
+            for (int y = p0; y <= a1; y++) s_img[(size_t)y * 466 + x] = 0;
+            int b0 = p0 > n1 + 1 ? p0 : n1 + 1;        /* below it */
+            for (int y = b0; y <= p1; y++) s_img[(size_t)y * 466 + x] = 0;
+            if (p0 < ny0) ny0 = p0;
+            if (p1 > ny1) ny1 = p1;
+        }
+        /* The gaps between broken-off blobs — the painting side never goes there */
+        for (int k = 1; k < nsp; k++) {
+            int g0 = s_sp1[x][k - 1] + 1, g1 = s_sp0[x][k] - 1;
+            for (int y = g0; y <= g1; y++) s_img[(size_t)y * 466 + x] = 0;
+        }
+        s_pv0[x] = (int16_t)n0;
+        s_pv1[x] = (int16_t)n1;
+    }
 
     /* 🚨 Paint the boat **before** the water, so the water covers the
      * submerged part. With that order reversed the boat always floated on top. */
     {
         int b0, b1;
-        paint_boat(&b0, &b1);
+        int bxa, bxb;
+        paint_boat(&bxa, &bxb, &b0, &b1);
         if (b0 < ny0) ny0 = b0;
         if (b1 > ny1) ny1 = b1;
+        s_bx0 = bxa; s_bx1 = bxb; s_by0 = b0; s_by1 = b1;
     }
     /* 🚨 This used to loop columns first and walk down inside each one. The
      * image buffer is laid out in rows (932 bytes each), so walking down
@@ -934,6 +1075,8 @@ static void frame_tick(const char *who, int64_t t0)
 
 static void step(lv_timer_t *t)
 {
+    water_fast(!launcher_screen_is_off());
+
     /* 🔋 Nothing to draw with the display off. 🚨 Do not change the period
      * here — lv_timer_set_period() calls lv_timer_handler_resume() internally,
      * so from a timer callback the handler restarts and never returns.
@@ -1293,6 +1436,9 @@ static void step(lv_timer_t *t)
     build_spans();
     int64_t _ts = esp_timer_get_time();
     paint_img();
+#ifdef BADGE_SIM
+    paint_verify();
+#endif
     /* 🚨 Invalidating the whole screen makes LVGL background-fill, copy and
      * DMA all 466 rows. The water is usually in the lower half, so that is
      * three passes of double waste (transfer was 78 ms, against a floor of
@@ -1373,6 +1519,13 @@ static bool alloc_all(void)
     GET(s_sp1, (size_t)466 * SPANS * 2);
     GET(s_spn, 466);       GET(s_sfrac, 466);
     GET(s_slope, 466);     GET(s_foam, 466);
+    GET(s_pv0, 466 * 2);   GET(s_pv1, 466 * 2);
+    /* 🚨 These say where the water was last frame, and they are read before
+     * they are first written. Left as malloc gave them, the clearing loops run
+     * with garbage for a y range and write outside the image — which lands as
+     * a cache error panic the moment the app opens, not as a wrong pixel.
+     * p0 > p1 means the column was empty. */
+    for (int i = 0; i < 466; i++) { s_pv0[i] = 1; s_pv1[i] = 0; }
     GET(s_cur, 466 * (int)sizeof(int));
     GET(s_scol, 466 * 3 * 2);
 #ifdef BADGE_SIM
@@ -1386,7 +1539,10 @@ static bool alloc_all(void)
     memcpy(s_rvx, s_vx, NP * sizeof(float));
     memcpy(s_rvy, s_vy, NP * sizeof(float));
 #endif
-    GET(s_img, (size_t)466 * 466 * 2);
+    /* 🚨 calloc, not malloc. With the memset gone (see paint_img's clearing
+     * comment) anywhere nobody paints goes to the screen exactly as allocated. */
+    s_img = heap_caps_calloc((size_t)466 * 466, 2, MALLOC_CAP_SPIRAM);
+    if (!s_img) return false;
     #undef GET
     depth_lut_build();
     s_img_dsc.header.magic  = LV_IMAGE_HEADER_MAGIC;
@@ -1405,7 +1561,7 @@ static void free_all(void)
     PUT(s_x); PUT(s_y); PUT(s_px); PUT(s_py); PUT(s_vx); PUT(s_vy);
     PUT(s_next); PUT(s_dens); PUT(s_chur);
     PUT(s_sp0); PUT(s_sp1); PUT(s_spn); PUT(s_sfrac); PUT(s_slope); PUT(s_foam);
-    PUT(s_cur); PUT(s_scol);
+    PUT(s_cur); PUT(s_scol); PUT(s_pv0); PUT(s_pv1);
 #ifdef BADGE_SIM
     s_rx = s_ry = s_rvx = s_rvy = NULL;      /* these were pointing at someone else's memory */
 #else
@@ -1506,6 +1662,7 @@ lv_timer_t *water_start(lv_obj_t *root)
 
 void water_stop(void)
 {
+    water_fast(false);           /* 🚨 left held, the badge sits at 240 MHz forever */
     s_loop = NULL;               /* the caller deletes the timer */
     /* 🚨 Delete the image before freeing the memory. The other way round
      * leaves a live s_field trying to draw particle arrays that are already

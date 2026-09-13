@@ -244,6 +244,27 @@ EOF
 grep -q "lv_display_trigger_activity" main/apps/app_water.c \
   && ok "water stays awake while it is tilted" || bad "the screen goes off while water is being played"
 
+echo "════ clearing the water image ════"
+# 🚨 paint_img() dropped its memset and clears only what changed, which is what
+#    took the frame from 80 ms to 54. The cost is that s_img now has to be
+#    allocated zeroed: with no memset, anywhere nobody paints goes to the screen
+#    exactly as it came from the allocator. Swapping the calloc back to a malloc
+#    would put whatever PSRAM held on screen for the first frame, and nothing
+#    would fail — it would just look wrong once, at startup, on a device nobody
+#    is watching with a debugger.
+python3 - <<'EOF' && ok "the water image is allocated zeroed, and nothing memsets it wholesale" || bad "s_img is not zeroed at allocation, or the wholesale memset came back"
+import re, sys
+src = open("main/apps/app_water.c", encoding="utf-8").read()
+m = re.search(r"^\s*s_img\s*=\s*(\w+)\(", src, re.M)
+if not m:
+    print("  cannot find where s_img is allocated"); sys.exit(1)
+if "calloc" not in m.group(1):
+    print("  s_img comes from %s(), which does not zero it" % m.group(1)); sys.exit(1)
+# the per-frame wholesale clear must not come back
+if re.search(r"memset\(s_img \+ \(size_t\)s_img_y0", src):
+    print("  the whole-band memset is back in paint_img()"); sys.exit(1)
+EOF
+
 echo "════ the frame yardstick ════"
 # 🚨 Measuring only compute time is half the story — painting and pushing the screen are left out and it does not match the eye
 # The **act of measuring** is checked, not the wording: both apps log the gap between frames

@@ -286,6 +286,12 @@ int  port_brightness_get(void);
 /* Block light sleep briefly. Held only while doing something that breaks when
  * the CPU sleeps, such as a BLE connection or I2S recording. Nestable. */
 void port_pm_hold(bool on);
+/* Runs the CPU at full speed while an app whose arithmetic is the frame is
+ * open. 🚨 Dynamic frequency scaling parks at min_freq (80 MHz) when nobody
+ * holds this — it does not raise the clock just because there is work to do.
+ * Held for the life of such an app only; holding it always burns battery.
+ * Nesting is fine. */
+void port_perf_hold(bool on);
 
 /* The background loop. In the simulator this does nothing and the caller drives it. */
 void port_task_start(const char *name, void (*fn)(void *), void *arg, int stack);

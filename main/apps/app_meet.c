@@ -2,8 +2,8 @@
  *
  * A company meeting room has no WiFi and no moment to pull out a phone. So
  * this app connects to nothing — it opens the microphone and piles the audio
- * into flash. Once home and on WiFi it goes up to the home server, and
- * transcription, speaker separation and minutes all happen there.
+ * into flash. Getting the files off is a deliberate act: hold the button, the
+ * badge re-enumerates as a read-only USB drive, and you copy them.
  *
  * Recording carries on with the app closed and the screen off (a separate
  * task). That is what lets the badge sit in a pocket through a meeting. */

@@ -22,9 +22,9 @@ does a handful of things well rather than many things badly.
 | **Fidgets** | A pool of water and a small solar system, both driven by the accelerometer. The planets are NASA maps, and each one falls back to being drawn in code if you delete it |
 | **Calc · Keys** | A calculator, and a set of shortcut keys over the same HID link |
 
-There is no cloud anything. WiFi is used for exactly two things — setting the
-clock, and only when the clock is stale — and you type the network on the badge
-itself.
+There is no cloud anything. WiFi comes up for one reason — setting the clock,
+and only once the clock has gone stale — plus the scan when you first pick a
+network, which you do on the badge itself.
 
 ## Flash it without building
 

@@ -1,0 +1,195 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AMOLED Badge</title>
+<meta name="description" content="Firmware for a round 466x466 AMOLED badge on the Waveshare ESP32-S3-Touch-AMOLED-1.75. Bluetooth trackpad, air mouse, clock, recorder, games.">
+<style>
+  :root {
+    color-scheme: light dark;
+    --ink:   light-dark(#111,   #f2f2f2);
+    --dim:   light-dark(#5f5f66, #a0a0a8);
+    --rule:  color-mix(in srgb, currentColor 14%, transparent);
+    --panel: color-mix(in srgb, currentColor 5%, transparent);
+    --accent: light-dark(#1266d6, #6aa9ff);
+  }
+  * { box-sizing: border-box; }
+  body { font: 17px/1.65 system-ui, sans-serif; color: var(--ink);
+         max-width: 54rem; margin: 0 auto; padding: 0 1.5rem 6rem;
+         -webkit-font-smoothing: antialiased; }
+  a { color: var(--accent); }
+  h1, h2, h3 { letter-spacing: -.022em; line-height: 1.15; }
+  h2 { font-size: 1.9rem; margin: 4.5rem 0 .4rem; }
+  h3 { font-size: 1.05rem; margin: 0 0 .25rem; }
+  p  { margin: .6rem 0; }
+  code { background: color-mix(in srgb, currentColor 10%, transparent);
+         padding: .1em .35em; border-radius: 4px; font-size: .88em; }
+  pre  { background: var(--panel); border-radius: 12px; padding: 1rem 1.2rem;
+         overflow-x: auto; line-height: 1.55; }
+  pre code { background: none; padding: 0; }
+  .lede { color: var(--dim); font-size: 1.15rem; max-width: 34rem; }
+
+  /* hero */
+  header { text-align: center; padding: 5rem 0 1rem; }
+  header h1 { font-size: clamp(2.6rem, 8vw, 4rem); font-weight: 700; margin: 0; }
+  header .lede { margin: .8rem auto 0; }
+  .shot { width: 100%; aspect-ratio: 1; border-radius: 50%; display: block;
+          background: #0b0b0f; }
+  .hero-shot { width: min(340px, 74vw); margin: 2.5rem auto 0;
+               box-shadow: 0 18px 60px -18px rgba(0,0,0,.55); }
+  .cta { display: flex; gap: .7rem; justify-content: center; flex-wrap: wrap;
+         margin-top: 2.6rem; }
+  .btn { display: inline-block; text-decoration: none; font-weight: 500;
+         padding: .62rem 1.3rem; border-radius: 999px;
+         border: 1px solid var(--accent); }
+  .btn.fill { background: var(--accent); color: light-dark(#fff, #0b1626);
+              border-color: transparent; }
+
+  /* features */
+  .feat { display: grid; gap: 2.6rem 2rem; margin-top: 2.5rem;
+          grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); }
+  .feat figure { margin: 0; }
+  .feat img { margin-bottom: 1rem; }
+  .feat p { color: var(--dim); font-size: .95rem; margin: 0; }
+
+  .plain { list-style: none; padding: 0; }
+  .plain li { padding: .75rem 0; border-top: 1px solid var(--rule); }
+  .plain li:first-child { border-top: 0; }
+  .plain b { font-weight: 600; }
+  .plain span { color: var(--dim); }
+
+  .warn { border-left: 3px solid #c8453a; padding: .1rem 0 .1rem .9rem;
+          margin: 1.6rem 0; }
+  footer { margin-top: 5rem; padding-top: 1.6rem; border-top: 1px solid var(--rule);
+           color: var(--dim); font-size: .88rem; }
+  @media (max-width: 30rem) { body { font-size: 16px; } }
+</style>
+
+<header>
+  <h1>AMOLED Badge</h1>
+  <p class="lede">A round screen you wear. It runs about a day on a charge,
+  wakes to a clock, and does a handful of things well rather than many
+  things badly.</p>
+  <img class="shot hero-shot" src="img/home.png" alt="The home screen: six apps around a night-sky wallpaper">
+  <div class="cta">
+    <a class="btn fill" href="flash/">Flash it from your browser</a>
+    <a class="btn" href="https://github.com/curisama/amoled-badge">Source on GitHub</a>
+  </div>
+</header>
+
+<h2>What it does</h2>
+<p class="lede">Open-source firmware for the Waveshare
+<b>ESP32-S3-Touch-AMOLED-1.75</b> — a 466&nbsp;×&nbsp;466 circular AMOLED with a
+touch panel, an accelerometer and a gyro.</p>
+
+<div class="feat">
+  <figure>
+    <img class="shot" src="img/mouse.png" alt="The Air Mouse screen, connected to a host">
+    <h3>Trackpad &amp; Air Mouse</h3>
+    <p>Bluetooth HID. Use the face as a touchpad, or lift it and point — the
+    gyro drives the cursor. A set of shortcut keys rides the same link.</p>
+  </figure>
+  <figure>
+    <img class="shot" src="img/clock.png" alt="The clock face: a seven-segment LCD reading 08:36">
+    <h3>Clock</h3>
+    <p>A seven-segment face drawn as shapes, not a bitmap, so it scales to the
+    panel. Timer, stopwatch and alarm sit behind it, and the lock screen is the
+    same face unlit.</p>
+  </figure>
+  <figure>
+    <img class="shot" src="img/water.png" alt="Water sloshing in the round display with a small sailboat on it">
+    <h3>Water</h3>
+    <p>380 particles of smoothed-particle fluid in a round tank, run by the
+    accelerometer, with a boat that rides whatever surface they make. Tilt it
+    and it pours.</p>
+  </figure>
+  <figure>
+    <img class="shot" src="img/orbit.png" alt="The Earth rendered on the round display">
+    <h3>Orbit</h3>
+    <p>The Moon, the Earth, Jupiter and the Sun, turned by hand. The maps are
+    NASA imagery; delete them and each body falls back to being drawn in
+    code.</p>
+  </figure>
+  <figure>
+    <img class="shot" src="img/games.png" alt="The games menu">
+    <h3>Games</h3>
+    <p>Brick breaker over five levels, pinball, a marble maze — all steered by
+    tilting the badge — and a sheet of bubble wrap.</p>
+  </figure>
+  <figure>
+    <img class="shot" src="img/rec.png" alt="The recorder, mid-recording, with a red ring counting up">
+    <h3>Recorder</h3>
+    <p>16&nbsp;kHz IMA-ADPCM straight to flash, about 52 minutes of it. Plug
+    the badge in, press <b>export</b>, and it re-enumerates as a read-only USB
+    drive full of <code>.WAV</code> files.</p>
+  </figure>
+</div>
+
+<h2>No cloud</h2>
+<p>WiFi comes up for one reason — setting the clock, and only once the clock
+has gone stale — plus the scan when you first pick a network on the badge
+itself. Nothing is uploaded, there is no account, no telemetry, and recordings
+leave the board only when you plug it in and ask.</p>
+
+<div class="warn">
+  <p>Recording other people is regulated differently depending on where you
+  are. In some places consent from one party to the conversation is enough; in
+  others every participant has to agree. Find out which one applies to you
+  before you use it.</p>
+</div>
+
+<h2>Put it on a board</h2>
+<p class="lede">Two ways. Neither of them needs a toolchain unless you want
+one.</p>
+
+<h3 style="margin-top:2rem">1 &middot; From the browser</h3>
+<p>Plug the badge in with a USB-C <i>data</i> cable and open the
+<a href="flash/">web flasher</a>. It wants Chrome or Edge — WebSerial is not in
+Safari or Firefox. If the Connect button never finds a port, it is usually the
+cable; failing that, hold <b>BOOT</b>, tap <b>RESET</b>, release <b>BOOT</b>.</p>
+
+<h3 style="margin-top:2rem">2 &middot; From source</h3>
+<p>You need <a href="https://docs.espressif.com/projects/esp-idf/en/stable/esp32s3/get-started/">ESP-IDF
+5.5</a> and nothing else; every other dependency is fetched on the first
+build.</p>
+<pre><code>git clone https://github.com/curisama/amoled-badge
+cd amoled-badge
+cp main/secrets.example.h main/secrets.h   # optional, may stay empty
+idf.py build
+idf.py -p /dev/ttyACM0 flash               # COMx on Windows</code></pre>
+<p><code>tools/setup.sh</code> does the same and works out which OS you are on.
+The first build pulls down roughly 20&nbsp;MB of components and takes a while;
+after that it is quick. Per-OS notes are in
+<a href="https://github.com/curisama/amoled-badge/blob/main/docs/SETUP.md">docs/SETUP.md</a>.</p>
+
+<div class="warn">
+  <p><b>The flash size matters.</b> This is for the <b>32&nbsp;MB</b> variant of
+  the board. The same model is sold with less, the partition table assumes
+  32&nbsp;MB, and the recording area will not fit on a smaller one. Flashing
+  replaces everything on the board, recordings included.</p>
+</div>
+
+<h2>It runs on a PC too</h2>
+<p>The whole interface builds and runs as a desktop program, with a fake IMU and
+a fake battery, so the tilt games and the power screens work there as well.
+Most of this firmware was written that way.</p>
+<pre><code>python3 sim/build.py
+PORT=8792 python3 sim/server.py   # then open http://localhost:8792</code></pre>
+
+<h2>How it is put together</h2>
+<ul class="plain">
+  <li><b>port.h</b> <span>— the seam. Everything hardware-specific sits behind
+  it; the board and the simulator each supply a half. A file outside
+  <code>port_esp.c</code> touching hardware directly is a bug.</span></li>
+  <li><b>main/apps/</b> <span>— one file per app.</span></li>
+  <li><b>tools/regress.sh</b> <span>— reads the sources, then drives the
+  simulator for the faults no pattern can catch. Half a minute. Not a test
+  suite so much as a list of scars.</span></li>
+</ul>
+
+<footer>
+  <p>MIT licensed. Third-party components are listed in
+  <a href="https://github.com/curisama/amoled-badge/blob/main/NOTICE">NOTICE</a>;
+  none of them are redistributed here. The planet maps are NASA imagery — NASA
+  does not endorse this project.</p>
+  <p><a href="https://github.com/curisama/amoled-badge">github.com/curisama/amoled-badge</a></p>
+</footer>

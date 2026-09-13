@@ -51,6 +51,13 @@
   .feat img { margin-bottom: 1rem; }
   .feat p { color: var(--dim); font-size: .95rem; margin: 0; }
 
+  .strip { display: grid; gap: 2.2rem 1.6rem; margin-top: 2.2rem;
+           grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); }
+  .strip figure { margin: 0; }
+  .strip img { margin-bottom: .8rem; }
+  .strip h3 { font-size: .98rem; }
+  .strip p { color: var(--dim); font-size: .88rem; margin: 0; }
+
   .plain { list-style: none; padding: 0; }
   .plain li { padding: .75rem 0; border-top: 1px solid var(--rule); }
   .plain li:first-child { border-top: 0; }
@@ -91,15 +98,22 @@ milled aluminium case, with a touch panel, an accelerometer and a gyro.</p>
   <figure>
     <img class="shot" src="img/mouse.png" alt="The Air Mouse screen, connected to a host">
     <h3>Trackpad &amp; Air Mouse</h3>
-    <p>Bluetooth HID. Use the face as a touchpad, or lift it and point — the
-    gyro drives the cursor. A set of shortcut keys rides the same link.</p>
+    <p>Bluetooth HID. Use the face as a touchpad, or lift it off the desk and
+    point — the gyro drives the cursor from there.</p>
   </figure>
   <figure>
-    <img class="shot" src="img/clock.png" alt="The clock face: a seven-segment LCD reading 08:36">
-    <h3>Clock</h3>
-    <p>A seven-segment face drawn as shapes, not a bitmap, so it scales to the
-    panel. Timer, stopwatch and alarm sit behind it, and the lock screen is the
-    same face unlit.</p>
+    <img class="shot" src="img/keys.png" alt="Twelve F-keys laid out in a ring">
+    <h3>Excel keys</h3>
+    <p>A phone's soft keyboard has no F keys, which is the real reason an Excel
+    formula cannot be touched over RDP from a phone. Twelve of them in a ring,
+    fired over the same Bluetooth link.</p>
+  </figure>
+  <figure>
+    <img class="shot" src="img/calc.png" alt="The calculator showing 56, its keys fitted to the circle">
+    <h3>Calc</h3>
+    <p>A 4&nbsp;×&nbsp;4 grid loses its corners on a round screen, so the digits
+    stack in three columns down the middle and the operators take the left and
+    right flanks &mdash; which is where the room actually is.</p>
   </figure>
   <figure>
     <img class="shot" src="img/water.png" alt="Water sloshing in the round display with a small sailboat on it">
@@ -116,17 +130,90 @@ milled aluminium case, with a touch panel, an accelerometer and a gyro.</p>
     code.</p>
   </figure>
   <figure>
-    <img class="shot" src="img/games.png" alt="The games menu">
-    <h3>Games</h3>
-    <p>Brick breaker over five levels, pinball, a marble maze — all steered by
-    tilting the badge — and a sheet of bubble wrap.</p>
-  </figure>
-  <figure>
     <img class="shot" src="img/rec.png" alt="The recorder, mid-recording, with a red ring counting up">
     <h3>Recorder</h3>
     <p>16&nbsp;kHz IMA-ADPCM straight to flash, about 52 minutes of it. Plug
     the badge in, press <b>export</b>, and it re-enumerates as a read-only USB
     drive full of <code>.WAV</code> files.</p>
+  </figure>
+  <figure>
+    <img class="shot" src="img/settings.png" alt="The settings list, each row showing its current value">
+    <h3>Settings</h3>
+    <p>Brightness, sound, screen-off delay, time zone, Wi-Fi and Bluetooth
+    pairing. Every row carries its own value, so nothing has to be opened just
+    to be read.</p>
+  </figure>
+</div>
+
+<h2>Four ways of watching time</h2>
+<p class="lede">Clock, timer, stopwatch and alarm are all one app &mdash; they
+are the same kind of thing, so they are four screens swiped through
+vertically rather than four icons on the home screen.</p>
+
+<div class="strip">
+  <figure>
+    <img class="shot" src="img/clock.png" alt="The clock face: a seven-segment LCD reading 08:36">
+    <h3>Clock</h3>
+    <p>Seven segments drawn as shapes rather than a bitmap, so it is sharp at
+    any size. Date, seconds, battery and uptime underneath. The lock screen is
+    the same face, unlit.</p>
+  </figure>
+  <figure>
+    <img class="shot" src="img/timer.png" alt="The timer: 25:00 with a ring most of the way round, and 5/15/25 presets">
+    <h3>Timer</h3>
+    <p>5, 15 or 25 minutes to start from. What is left is a ring closing rather
+    than a number to read &mdash; the one thing a round screen does better than
+    a rectangle. Tap to start, hold to reset.</p>
+  </figure>
+  <figure>
+    <img class="shot" src="img/stopwatch.png" alt="The stopwatch running at 00:05.43 with a lap at 00:02.25">
+    <h3>Stopwatch</h3>
+    <p>Here the digits are the point, so there is no ring. Hold to take a lap.
+    Every character gets a fixed-width cell of its own &mdash; in one centred
+    label a proportional font makes the number shiver.</p>
+  </figure>
+  <figure>
+    <img class="shot" src="img/alarm.png" alt="The alarm set to 07:00, with hour and minute arrows and an off button">
+    <h3>Alarm</h3>
+    <p>It is watched by the launcher, not the app, so it still rings with the
+    app closed. And it stays quiet until the clock has been set: judging seven
+    in the morning against 1970 would fire the moment you plugged it in.</p>
+  </figure>
+</div>
+
+<h2>Games</h2>
+<p class="lede">None of them cost much &mdash; each moves a handful of shapes.
+Three of the four are played by tilting the badge, which puts an IMU that is
+sitting there anyway to work.</p>
+
+<div class="strip">
+  <figure>
+    <img class="shot" src="img/bricks.png" alt="Brick breaker: three rows of bricks at the top, a curved paddle at the bottom">
+    <h3>Bricks</h3>
+    <p>A paddle that runs along the bottom arc and bricks laid round the circle
+    &mdash; a shape a rectangular screen cannot make. Five levels, and three
+    balls, because losing all of it to one miss is where people put the badge
+    down.</p>
+  </figure>
+  <figure>
+    <img class="shot" src="img/pinball.png" alt="Pinball: bumpers and drop targets with two flippers on the bottom arc">
+    <h3>Pinball</h3>
+    <p>The round screen is the table. Bumpers, drop targets, and a flipper at
+    each end of the bottom arc &mdash; tap the left or right half of the screen
+    to swing them.</p>
+  </figure>
+  <figure>
+    <img class="shot" src="img/marble.png" alt="The marble maze: a white marble and a dark hole inside the rim">
+    <h3>Marble</h3>
+    <p>Tilt to roll it. Drop it in the hole and the next hole appears somewhere
+    else. Nothing to it, which is the idea.</p>
+  </figure>
+  <figure>
+    <img class="shot" src="img/pop.png" alt="Bubble wrap with four bubbles already popped and fifteen left">
+    <h3>Pop</h3>
+    <p>Bubble wrap. They pop on the press rather than the release, which is the
+    whole difference between it feeling right and feeling wrong. Then they come
+    back.</p>
   </figure>
 </div>
 

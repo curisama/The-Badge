@@ -251,6 +251,9 @@ static void hide_buttons(lv_obj_t *obj)
  *   W                 short PWR press (toggles the screen)
  *   #                 hide the chrome (for capturing app icons)
  *                     🚨 A..Z are all taken, hence the punctuation.
+ *   !                 hide the home handle only, keeping the app's buttons
+ *                     (for documentation screenshots — # would strip the
+ *                     timer presets and the games menu along with it)
  *   P <ms>            advance by that much
  *   F                 ask for a frame → "FRAME <bytes>\n" + raw RGB888
  *   R                 ask for a frame → "FRAME <bytes>\n" + raw RGB565 (half the size)
@@ -314,6 +317,13 @@ static void serve_loop(void)
             hide_buttons(lv_screen_active());
             break;
         }
+        /* 🚨 Same idea as # but only the handle. A screenshot of the timer or
+         * the games menu taken with # comes out empty, because the presets and
+         * the menu entries are lv_buttons and # hides every one of them. Here
+         * the app's own controls are the subject of the picture. */
+        case '!':
+            launcher_handle_show(false);
+            break;
         case 'D': {
             int op = atoi(line + 1);
             if (op == 0) {

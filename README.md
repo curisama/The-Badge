@@ -33,11 +33,15 @@ does a handful of things well rather than many things badly.
 | | |
 |---|---|
 | **Trackpad / Air Mouse** | Bluetooth HID. Use it as a touchpad, or point with it — the gyro drives the cursor |
-| **Clock** | Digital LCD face, plus timer, stopwatch and alarm |
+| **Excel keys** | Twelve keys a phone's soft keyboard does not have, in a ring, over the same HID link: F1 F2 F4 F5 F12, Esc Tab Ent Del, Ctrl+; (today), Ctrl+[ (trace precedents), Ctrl+F4. Without F4 there is no touching a formula over RDP from a phone |
+| **Clock** | One app, four screens, swiped vertically — a seven-segment face, a timer whose ring closes as it runs, a stopwatch with laps, and an alarm the launcher watches so it rings with the app closed |
 | **Recorder** | 16 kHz IMA-ADPCM to flash, about 52 minutes. Plug in and it appears as a read-only USB drive full of `.WAV` files |
-| **Games** | Brick breaker (5 levels), pinball, marble maze, bubble wrap |
+| **Games** | Bricks (a ring paddle, five levels, three balls), pinball on a round table, a tilt marble maze, and bubble wrap |
 | **Fidgets** | A pool of water and a small solar system, both driven by the accelerometer. The planets are NASA maps, and each one falls back to being drawn in code if you delete it |
-| **Calc · Keys** | A calculator, and a set of shortcut keys over the same HID link |
+| **Calc** | A 4×4 grid loses its corners on a round screen, so the digits run in three columns down the middle and the operators take the flanks |
+| **Settings** | Brightness, sound, screen-off delay, time zone, Wi-Fi and Bluetooth pairing — every row carrying its own value so nothing is opened just to be read |
+
+More of them, with screenshots: **<https://curisama.github.io/amoled-badge/>**
 
 There is no cloud anything. WiFi comes up for one reason — setting the clock,
 and only once the clock has gone stale — plus the scan when you first pick a

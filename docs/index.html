@@ -89,6 +89,31 @@
   </div>
 </header>
 
+<h2>Why not the firmware it came with</h2>
+<p class="lede">It started as one thing. I wanted an air mouse &mdash; driving a
+PC from a phone over RDP means toggling between touch and pointer mode forever,
+and I wanted a physical thing that simply pointed. Everything else here arrived
+after that.</p>
+
+<ul class="plain">
+  <li><b>Things I would actually reach for.</b> <span>A clock, a timer, a
+  recorder for meetings, a calculator, the F-keys a phone keyboard does not
+  have. Not a tour of what the hardware can do.</span></li>
+  <li><b>No voice, no chatbot.</b> <span>The demos written for this board lean
+  on voice assistants and LLM chat. On a 1.75-inch screen with no keyboard I
+  would use that twice and never again, so none of it is here.</span></li>
+  <li><b>Some of it is just taste.</b> <span>The water, the orbs and the games
+  are not useful and are not pretending to be. They are in because I like
+  them.</span></li>
+  <li><b>And the power.</b> <span>None of Waveshare's own ESP-IDF examples turn
+  on <code>CONFIG_PM_ENABLE</code> or tickless idle, and the one example that
+  shuts down the twelve unused AXP2101 rails is not the path the board support
+  package takes &mdash; so a build started from them leaves the CPU awake and a
+  dozen regulators switching into nothing. Here the chip sleeps between frames
+  and two rails are left standing. With the screen off that took standby from
+  11.9 hours on a charge to 19.6.</span></li>
+</ul>
+
 <h2>What it does</h2>
 <p class="lede">Open-source firmware for the Waveshare
 <b>ESP32-S3-Touch-AMOLED-1.75C</b> — a 466&nbsp;×&nbsp;466 circular AMOLED in a

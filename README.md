@@ -23,6 +23,15 @@ on a 1.75C and it wakes up in 1970.
 It is a thing you wear. It runs about a day on a charge, wakes to a clock, and
 does a handful of things well rather than many things badly.
 
+It started as an air mouse — driving a PC from a phone over RDP means toggling
+between touch and pointer mode forever, and I wanted something that just
+pointed. The rest is what I would actually reach for, minus the voice
+assistant and LLM chat the demos for this board are built around; the water,
+the orbs and the games are in because I like them. Power was the other reason:
+none of Waveshare's own ESP-IDF examples enable `CONFIG_PM_ENABLE` or tickless
+idle, and the example that shuts down the twelve unused AXP2101 rails is not
+the path the BSP takes. Doing both took standby from 11.9 hours to 19.6.
+
 <p align="center">
   <img src="docs/img/lock.png"  width="23%" alt="lock screen">
   <img src="docs/img/home.png"  width="23%" alt="home">

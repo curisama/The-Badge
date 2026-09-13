@@ -2,7 +2,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AMOLED Badge</title>
-<meta name="description" content="Firmware for a round 466x466 AMOLED badge on the Waveshare ESP32-S3-Touch-AMOLED-1.75. Bluetooth trackpad, air mouse, clock, recorder, games.">
+<meta name="description" content="Firmware for a round 466x466 AMOLED badge on the Waveshare ESP32-S3-Touch-AMOLED-1.75C, the aluminium-case one. Bluetooth trackpad, air mouse, clock, recorder, games.">
 <style>
   :root {
     color-scheme: light dark;
@@ -57,6 +57,12 @@
   .plain b { font-weight: 600; }
   .plain span { color: var(--dim); }
 
+  .tablewrap { overflow-x: auto; margin: 1.6rem 0; }
+  table { border-collapse: collapse; width: 100%; font-size: .95rem; }
+  th, td { text-align: left; padding: .6rem .9rem .6rem 0;
+           border-bottom: 1px solid var(--rule); vertical-align: top; }
+  thead th { font-weight: 600; }
+  tbody th { font-weight: 500; color: var(--dim); white-space: nowrap; }
   .warn { border-left: 3px solid #c8453a; padding: .1rem 0 .1rem .9rem;
           margin: 1.6rem 0; }
   footer { margin-top: 5rem; padding-top: 1.6rem; border-top: 1px solid var(--rule);
@@ -78,8 +84,8 @@
 
 <h2>What it does</h2>
 <p class="lede">Open-source firmware for the Waveshare
-<b>ESP32-S3-Touch-AMOLED-1.75</b> — a 466&nbsp;×&nbsp;466 circular AMOLED with a
-touch panel, an accelerometer and a gyro.</p>
+<b>ESP32-S3-Touch-AMOLED-1.75C</b> — a 466&nbsp;×&nbsp;466 circular AMOLED in a
+milled aluminium case, with a touch panel, an accelerometer and a gyro.</p>
 
 <div class="feat">
   <figure>
@@ -124,6 +130,44 @@ touch panel, an accelerometer and a gyro.</p>
   </figure>
 </div>
 
+<h2>The board</h2>
+<p class="lede">The trailing <b>C</b> is not a revision. Waveshare sells a plain
+<b>1.75</b> as well and it is a different board — this firmware is for the
+<b>1.75C</b> and will not run on the other one.</p>
+
+<div class="tablewrap">
+<table>
+  <thead><tr><th></th><th>1.75C &mdash; this one</th><th>1.75</th></tr></thead>
+  <tbody>
+    <tr><th>Case</th><td>CNC aluminium, badge-shaped</td><td>bare board</td></tr>
+    <tr><th>Flash</th><td>32&nbsp;MB</td><td>16&nbsp;MB</td></tr>
+    <tr><th>PSRAM</th><td colspan="2">8&nbsp;MB, octal &mdash; the same on both</td></tr>
+    <tr><th>microSD</th><td>none</td><td>TF slot</td></tr>
+    <tr><th>RTC</th><td>none</td><td>PCF85063</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>Two of those rows are load-bearing here.</p>
+<ul class="plain">
+  <li><b>32 MB of flash.</b> <span>The partition table assumes it, and most of
+  it is the recording area. On a 16&nbsp;MB board the table does not fit, so a
+  plain 1.75 will not take this build at all &mdash; it is not a matter of
+  losing a feature.</span></li>
+  <li><b>No RTC.</b> <span>The 1.75C has no clock chip, so cutting the power
+  loses the time; that is the whole reason the badge goes to the network for
+  it. I2C on the real board answers at <code>18 34 40 5A 6B</code> and nothing
+  at <code>0x51</code>. The PCF85063 driver is still in <code>port_esp.c</code>
+  &mdash; it probes, finds nothing, and says so.</span></li>
+</ul>
+
+<p>The 1.75C itself is listed two ways, <b>With Battery</b> and
+<b>Without Battery</b>. Everything here was written and tested on the one with
+the cell fitted; that is where the day-per-charge figure, the battery gauge and
+the standby measurements come from. The firmware does not require it &mdash;
+the power management chip is on the board either way &mdash; but the
+battery-less one has not been tried here.</p>
+
 <h2>No cloud</h2>
 <p>WiFi comes up for one reason — setting the clock, and only once the clock
 has gone stale — plus the scan when you first pick a network on the badge
@@ -162,10 +206,11 @@ after that it is quick. Per-OS notes are in
 <a href="https://github.com/curisama/amoled-badge/blob/main/docs/SETUP.md">docs/SETUP.md</a>.</p>
 
 <div class="warn">
-  <p><b>The flash size matters.</b> This is for the <b>32&nbsp;MB</b> variant of
-  the board. The same model is sold with less, the partition table assumes
-  32&nbsp;MB, and the recording area will not fit on a smaller one. Flashing
-  replaces everything on the board, recordings included.</p>
+  <p><b>Check the board first.</b> This is for the
+  <b>ESP32-S3-Touch-AMOLED-1.75<span style="letter-spacing:.05em">C</span></b>
+  and its 32&nbsp;MB of flash. The plain 1.75 has 16&nbsp;MB and a different
+  board support package; the partition table will not fit it. Flashing replaces
+  everything on the board, recordings included.</p>
 </div>
 
 <h2>It runs on a PC too</h2>

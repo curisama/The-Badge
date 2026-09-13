@@ -1038,8 +1038,10 @@ void port_time_sync_start(void)
     xTaskCreate(sync_task, "timesync", 4096, NULL, 4, NULL);
 }
 
-/* This board has no RTC chip — losing power loses the time. So it goes and
- * sets the clock once after boot.
+/* The 1.75C has no RTC chip — losing power loses the time. (The plain 1.75
+ * does have one, a PCF85063, which is why the driver below exists at all; on
+ * this board it probes and finds nothing.) So it goes and sets the clock once
+ * after boot.
  * 🚨 It used to sync only "when the clock was not set", which meant that once
  * set it **never synced again**. With no RTC the time runs off the chip's own
  * oscillator and gains minutes a day (reported as three or four minutes ahead
@@ -1326,9 +1328,13 @@ int port_pwr_key(void)
 }
 
 /* ── PCF85063 RTC ─────────────────────────────────────────────
- * The ESP's internal clock is lost with power. The RTC chip on the board runs
- * from its own cell, so it is read at boot and written whenever the clock is
- * set. Without it, every power-on is 1970. */
+ * The ESP's internal clock is lost with power, so an RTC running from its own
+ * cell would be read at boot and written whenever the clock is set.
+ * 🚨 The 1.75C does not have one. I2C answers at 18 34 40 5A 6B and nothing at
+ * 0x51, so every one of these calls fails and says so in the log — that is
+ * expected, not a fault. It is kept because the plain 1.75 carries a PCF85063
+ * at this address, and because the cost of probing once at boot is nothing.
+ * Without an RTC, every power-on is 1970 until the clock syncs. */
 #define RTC_ADDR      0x51
 #define RTC_REG_SEC   0x04       /* sec, min, hour, day, weekday, month, year — 7 bytes BCD */
 
@@ -1366,8 +1372,21 @@ static void rtc_write_now(void)
         dec2bcd(tm.tm_mon + 1),
         dec2bcd(tm.tm_year % 100),
     };
-    i2c_master_transmit(s_rtc, b, sizeof(b), 200);
-    ESP_LOGI("rtc", "written to the RTC");
+    /* 🚨 rtc_open() only registers a device on the bus — it does not go and
+     * look, so it succeeds on a board with no RTC and the write then NACKs.
+     * The return used to be thrown away, and the log said "written to the RTC"
+     * on a 1.75C, which has none. It is said once and then left alone; on this
+     * board it is the expected outcome, not an hourly complaint. */
+    if (i2c_master_transmit(s_rtc, b, sizeof(b), 200) == ESP_OK) {
+        ESP_LOGI("rtc", "written to the RTC");
+        return;
+    }
+    static bool said;
+    if (!said) {
+        said = true;
+        ESP_LOGW("rtc", "no RTC at 0x%02X to write to — the time will not "
+                        "survive a power cut (normal on the 1.75C)", RTC_ADDR);
+    }
 }
 
 /* The time zone is held as minutes offset from UTC and turned into a POSIX

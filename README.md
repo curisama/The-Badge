@@ -1,7 +1,24 @@
 # AMOLED Badge
 
 Firmware for a round 466×466 AMOLED badge built on the Waveshare
-**ESP32-S3-Touch-AMOLED-1.75** (the 32 MB flash / 8 MB PSRAM variant).
+**ESP32-S3-Touch-AMOLED-1.75C** — the one in the milled aluminium case.
+Developed and tested on the **With Battery** version of it.
+
+The trailing **C** is not a revision. Waveshare also sells a plain 1.75, and
+it is a different board:
+
+| | 1.75C — this one | 1.75 |
+|---|---|---|
+| Case | CNC aluminium, badge-shaped | bare board |
+| Flash | **32 MB** | 16 MB |
+| PSRAM | 8 MB octal | 8 MB octal |
+| microSD | none | TF slot |
+| RTC | **none** | PCF85063 |
+
+Two of those matter. The partition table assumes 32 MB and most of it is the
+recording area, so a 16 MB board will not take this build at all. And the
+missing RTC is why the badge goes to the network for the time — cut the power
+on a 1.75C and it wakes up in 1970.
 
 It is a thing you wear. It runs about a day on a charge, wakes to a clock, and
 does a handful of things well rather than many things badly.
@@ -54,8 +71,9 @@ idf.py -p /dev/ttyACM0 flash               # COMx on Windows
 The first build downloads roughly 20 MB of components and takes a while; after
 that it is quick.
 
-> **The flash size matters.** The partition table assumes 32 MB. The same board
-> is sold with less, and the recording partition will not fit.
+> **Check the board again here.** The partition table assumes the 1.75C's
+> 32 MB. On a plain 1.75 the recording partition does not fit and the build
+> will not flash.
 
 ## Simulator
 

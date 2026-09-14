@@ -4,6 +4,11 @@ Firmware for a round 466×466 AMOLED badge built on the Waveshare
 **ESP32-S3-Touch-AMOLED-1.75C** — the one in the milled aluminium case.
 Developed and tested on the **With Battery** version of it.
 
+<p align="center">
+  <img src="docs/img/real/home.jpg" width="46%" alt="The Badge in hand, home screen">
+  <img src="docs/img/real/water.jpg" width="46%" alt="The water fidget sloshing">
+</p>
+
 The trailing **C** is not a revision. Waveshare also sells a plain 1.75, and
 it is a different board:
 
@@ -33,6 +38,18 @@ idle, and the example that shuts down the twelve unused AXP2101 rails is not
 the path the BSP takes. Switching the panel off for real, light sleep and those
 rails together took standby here from 11.9 hours to 19.6 — this firmware before
 and after that work, not a comparison against the one the board shipped with.
+
+It is easier to show than to describe. Both of these are the real board,
+filmed in one take:
+
+<p align="center">
+  <img src="docs/img/real/water.gif" width="40%" alt="water sloshing with the accelerometer">
+  <img src="docs/img/real/bricks.gif" width="40%" alt="playing bricks on the round screen">
+</p>
+<p align="center"><sub>Left: the water moves with the board, and the boat rides it.
+Right: bricks, with the paddle on the ring.</sub></p>
+
+The rest of these are from the desktop simulator — same code, same pixels:
 
 <p align="center">
   <img src="docs/img/lock.png"  width="23%" alt="lock screen">

@@ -13,7 +13,10 @@ on:
 
 # The deploy job needs these; the build jobs do not use them.
 permissions:
-  contents: read
+  # 🚨 read 로는 태그를 밀었을 때 "릴리스에 바이너리 붙이기" 가 죽는다
+  # (Resource not accessible by integration). 그러면 pages 단계까지 건너뛰어
+  # 웹 플래셔와 랜딩 페이지가 옛것으로 남는다 — 0914 에 v1.0 을 끊고 걸렸다.
+  contents: write
   pages: write
   id-token: write
 

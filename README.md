@@ -39,6 +39,14 @@ the path the BSP takes. Switching the panel off for real, light sleep and those
 rails together took standby here from 11.9 hours to 19.6 — this firmware before
 and after that work, not a comparison against the one the board shipped with.
 
+<p align="center">
+  <img src="docs/img/real/pointer.gif" width="32%" alt="moving the cursor with the badge">
+  <img src="docs/img/real/rightclick.gif" width="32%" alt="opening a right-click menu">
+</p>
+<p align="center"><sub>Driving a laptop from the glass: the cursor on the left,
+a right-click menu on the right. Same BLE HID link either way — hold it and
+point, or rub the face like a touchpad.</sub></p>
+
 It is easier to show than to describe. Both of these are the real board,
 filmed in one take:
 

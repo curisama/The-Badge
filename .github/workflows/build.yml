@@ -65,6 +65,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: firmware
+          retention-days: 7
           path: out/
 
       # 🚨 The web flasher reads manifest.json from beside itself on Pages, and

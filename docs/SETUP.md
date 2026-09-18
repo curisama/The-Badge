@@ -9,7 +9,7 @@ git**. Those are all you have to bring.
 | | why | how |
 |---|---|---|
 | `main/secrets.h` | it holds the WiFi password | make it by hand, in the form below |
-| `managed_components/` | somebody else's code (LVGL and 21 others) | `idf.py reconfigure` fetches it |
+| `managed_components/` | somebody else's code (LVGL and 20 others) | `idf.py reconfigure` fetches it |
 | `sdkconfig` | it is regenerated on each machine | generated from `sdkconfig.defaults` |
 | `build/` | output | build again |
 
@@ -45,14 +45,14 @@ idf.py -p /dev/ttyACM0 flash monitor       # COMx on Windows
 
 ## Rules for working from both machines
 
-- **Branches**: everyday work is on `master`; experiments get their own branch.
+- **Branches**: everyday work is on `main`; experiments get their own branch.
 - **`git pull` before starting.** Fixing something on one side and again on the other makes a tedious merge.
 - **Push when finished.** Even half-done work is better pushed on a branch.
 
 ## The checks to run before and after touching anything
 
 ```bash
-./tools/regress.sh              # have any of the 16 past faults come back (source only)
+./tools/regress.sh              # have any of the 64 past faults come back (source only)
 python3 tools/sim-exit-check.py # does any board die on the way home
 python3 tools/sim-stress.py     # a shaken clock and rough handling
 ```

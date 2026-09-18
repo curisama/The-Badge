@@ -32,6 +32,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 🚨 The LVGL adapter pulls in FreeType, libpng, libjpeg-turbo and LZ4
+      # only when the matching LV_USE_* switches are on. It reads those switches
+      # while the dependencies are still being solved — before LVGL is unpacked
+      # and its Kconfig exists — so on a clean checkout there is nothing to read.
+      # That used to count as "off"; since 2026-09 a missing one aborts the
+      # build instead. Writing the four out up front is what gets the solve
+      # through. The badge draws with built-in fonts and wants none of them.
+      - name: Answer the switches the dependency solver reads too early
+        run: |
+          mkdir -p build/config
+          cat > build/config/sdkconfig.json <<'JSON'
+          {
+            "LV_USE_FREETYPE": false,
+            "LV_USE_LIBJPEG_TURBO": false,
+            "LV_USE_LIBPNG": false,
+            "LV_USE_LZ4": false
+          }
+          JSON
+
       - name: Build for esp32s3
         uses: espressif/esp-idf-ci-action@v1
         with:

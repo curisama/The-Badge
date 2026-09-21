@@ -64,7 +64,7 @@ The rest of these are from the desktop simulator — same code, same pixels:
   <img src="docs/img/lock.png"  width="23%" alt="lock screen">
   <img src="docs/img/home.png"  width="23%" alt="home">
   <img src="docs/img/clock.png" width="23%" alt="clock">
-  <img src="docs/img/games.png" width="23%" alt="games">
+  <img src="docs/img/keys.png"  width="23%" alt="the Excel key ring">
 </p>
 
 | | |

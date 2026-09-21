@@ -169,6 +169,11 @@ It reads the sources, then drives the simulator for the few faults no pattern
 can catch. Half a minute, and it catches the things that have actually broken
 here before — not a test suite so much as a list of scars.
 
+## What changed
+
+[`CHANGELOG.md`](CHANGELOG.md) — each entry says why the thing broke, not just
+that it was fixed. Usually the interesting half.
+
 ## License
 
 MIT, see `LICENSE`. Third-party components are listed in `NOTICE`; none of them

@@ -132,6 +132,7 @@ static uint32_t s_base_ms;      /* when it started running */
 static uint32_t s_acc_ms;       /* what piled up while it was stopped */
 static uint32_t s_lap_ms;       /* where the last lap was taken */
 static uint32_t s_press_ms;
+static lv_point_t s_press_pt;   /* 누르기 시작한 자리 — 쓸기와 가른다 */
 static bool     s_long_done;
 
 static uint32_t elapsed(void)
@@ -207,7 +208,17 @@ static void set_run(bool on)
 static void press_cb(lv_event_t *e)
 {
     lv_event_code_t code = lv_event_get_code(e);
-    if (code == LV_EVENT_PRESSED) { s_press_ms = lv_tick_get(); s_long_done = false; return; }
+    if (code == LV_EVENT_PRESSED) {
+        s_press_ms = lv_tick_get();
+        s_long_done = false;
+        /* 🚨 **쓸기를 탭으로 읽던 것을 막는다(0921).** 앱을 나가려고 화면을
+         * 쓸었는데 스톱워치가 출발해 버렸다. 누른 자리를 적어 두고, 뗄 때
+         * 60px 넘게 움직였으면 탭으로 안 친다 — Wire Keys 가 쓰는 그 수다. */
+        lv_indev_t *in = lv_indev_active();
+        if (in) lv_indev_get_point(in, &s_press_pt);
+        else    s_press_pt.x = s_press_pt.y = 0;
+        return;
+    }
 
     if (code == LV_EVENT_PRESSING) {
         if (s_long_done || lv_tick_get() - s_press_ms < 600) return;
@@ -222,7 +233,14 @@ static void press_cb(lv_event_t *e)
     }
 
     if (code == LV_EVENT_RELEASED) {
-        if (!s_long_done) set_run(!s_run);
+        if (s_long_done) return;
+        /* 🚨 손이 많이 움직였으면 쓸기다 — 출발시키지 않는다. */
+        lv_indev_t *in = lv_indev_active();
+        lv_point_t p = s_press_pt;
+        if (in) lv_indev_get_point(in, &p);
+        int dx = p.x - s_press_pt.x, dy = p.y - s_press_pt.y;
+        if (dx * dx + dy * dy >= 60 * 60) return;
+        set_run(!s_run);
     }
 }
 

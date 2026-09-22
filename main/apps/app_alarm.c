@@ -59,6 +59,18 @@ static void load(void)
     }
 }
 
+/* Is an alarm set? 🚨 **The launcher asks on its way to turning the display
+ * off.** With nothing set there is no reason to look at the clock every
+ * second, so the launcher stops that timer and saves the wake-ups. With
+ * something set it must not stop it — stopping it is what kept the alarm from
+ * ringing at all (fixed 2026-09-22). Touches no LVGL, so it is safe to call
+ * with the display off and the app closed. */
+bool alarm_armed(void)
+{
+    load();
+    return s_on;
+}
+
 /* ── ringing ────────────────────────────────────────────────── */
 static void beep_step(lv_timer_t *t)
 {

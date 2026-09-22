@@ -40,6 +40,25 @@ AR = os.environ.get("AR", "ar")
 JOBS = int(os.environ.get("SIM_JOBS") or os.cpu_count() or 4)
 
 CFLAGS = ["-O1", "-w", "-DBADGE_SIM", "-DLV_CONF_INCLUDE_SIMPLE"]
+
+# 🚨 **`-w` is for other people's code (LVGL), not ours.** Turning every
+#    warning off left the fastest feedback loop in the project blind to the
+#    whole class of mistake it is best placed to catch — the kind that only
+#    shows up when the board is finally built.
+#
+# 🚨 **`-w` cannot be undone by order.** `-w -Werror=switch` and the reverse
+#    both produce no diagnostic at all (checked both ways round). It has to go.
+#
+# What is listed here is what the firmware build treats as an error and a PC
+# can catch too. Other warnings stay on and are discarded — `compile_one` only
+# repeats a file when the compiler exits non-zero, so nothing gets noisy.
+OUR_CFLAGS = [f for f in CFLAGS if f != "-w"] + [
+    "-Werror=switch",
+    "-Werror=implicit-function-declaration",
+    "-Werror=return-type",
+    "-Werror=incompatible-pointer-types",
+    "-Werror=int-conversion",
+]
 if os.environ.get("SIM_TIGHT"):
     CFLAGS.append("-DBADGE_SIM_TIGHT")
 if os.name == "nt":
@@ -118,6 +137,13 @@ def is_fresh(src: Path, obj: Path) -> bool:
     return True
 
 
+def flags_for(src: Path):
+    """Ours or theirs. Everything under `sim/` and `../main/` is ours."""
+    p = src.as_posix()
+    ours = p.startswith("main_sim") or p.startswith("port_sim") or "/main/" in p
+    return OUR_CFLAGS if ours else CFLAGS
+
+
 def compile_one(src: Path, into: str, skip_fresh: bool):
     obj = obj_for(src, into)
     if skip_fresh and is_fresh(src, obj):
@@ -126,7 +152,7 @@ def compile_one(src: Path, into: str, skip_fresh: bool):
     #    half-written object, and the next build takes it for a good one.
     tmp = obj.parent / (obj.name + ".part")
     dep = obj.with_name(obj.name[:-2] + ".d")
-    r = subprocess.run([CC, *CFLAGS, *INC, "-MMD", "-MF", str(dep),
+    r = subprocess.run([CC, *flags_for(src), *INC, "-MMD", "-MF", str(dep),
                         "-c", str(src), "-o", str(tmp)],
                        capture_output=True, text=True, errors="replace")
     if r.returncode != 0:

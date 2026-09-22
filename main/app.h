@@ -98,6 +98,7 @@ void alarm_build(lv_obj_t *root);
 void alarm_free(void);
 /* 🚨 The alarm is the one that runs outside its app — the launcher ticks it. */
 void alarm_tick(void);
+bool alarm_armed(void);   /* is one set — the launcher asks before going dark */
 
 /* 🚨 Never call lv_timer_set_period() from inside a timer callback.
  * It calls lv_timer_handler_resume(), so the handler restarts right there and

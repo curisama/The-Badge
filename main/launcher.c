@@ -72,8 +72,26 @@ static void idle_timers(bool screen_on)
         lv_timer_t *rt = lv_display_get_refr_timer(d);
         if (rt) { if (screen_on) lv_timer_resume(rt); else lv_timer_pause(rt); }
     }
-    /* Checking for idleness is meaningless while off — it is already off. */
-    if (s_idle) { if (screen_on) lv_timer_resume(s_idle); else lv_timer_pause(s_idle); }
+    /* 🚨 **This timer does more than watch for idleness — the alarm is checked
+     * on it too.** Idleness means nothing while the display is off, so this
+     * was stopped to save the wake-ups, and `alarm_tick()` stopped with it:
+     * **the alarm never rang with the display off**, which is precisely when
+     * an alarm matters. Both places read correctly on their own; the comment
+     * in `app_alarm.c` even says it rings with the display off, and `idle_cb`
+     * takes care to run the alarm above its early returns. A later line added
+     * for power quietly undid all of it (found 2026-09-22).
+     *
+     * With nothing set it still stops — that is the common case and the
+     * saving is real. With something set it costs one wake a second, on top
+     * of a 200 ms timer that is already running.
+     *
+     * 🚨 Turning the display back on resumes unconditionally. Someone who
+     * switches the alarm on after waking the screen would otherwise be left
+     * with it stopped for the rest of that run. */
+    if (s_idle) {
+        if (screen_on || alarm_armed()) lv_timer_resume(s_idle);
+        else                            lv_timer_pause(s_idle);
+    }
 
     lv_indev_t *in = badge_display_indev();
     if (in) {
@@ -240,6 +258,13 @@ static void idle_cb(lv_timer_t *t)
      * It has to sit **above** the early returns below — with the display off
      * (s_veil) nothing further down is reached. */
     alarm_tick();
+#ifdef BADGE_SIM
+    /* 🚨 **A check counts this line** (`tools/sim-alarm-tick-check.py`): set an
+     * alarm, turn the display off, and see whether the counting stops. Nothing
+     * about the shape of the code shows that, so it is measured. Not built
+     * into the firmware. */
+    port_log(TAG, "tick alarm veil=%d", s_veil ? 1 : 0);
+#endif
     if (s_timeout_s <= 0 || s_veil) return;
     /* With the display off the veil blocks touch, which kills the mouse
      * outright. It is also used while looking at another screen, so idle time

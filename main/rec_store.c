@@ -266,6 +266,13 @@ bail:
 
 bool port_rec_start(int lang)
 {
+    /* 🚨 Right after a stop the mic task is still finishing (last page,
+     * directory write, handing back I2S). The screen goes to OK the moment
+     * stop is pressed, so a quick second tap was refused here as "still
+     * running" and showed "!". If the running one was told to stop, wait for
+     * it (up to 1 s) — the finishing path never takes the LVGL lock, so
+     * waiting here cannot deadlock. */
+    for (int i = 0; i < 100 && s_active && s_stop_req; i++) vTaskDelay(pdMS_TO_TICKS(10));
     dir_load();
     if (!s_part || s_active) return false;
     if (port_rec_free_seconds() < 60) { ESP_LOGW(TAG, "less than a minute of space left"); return false; }

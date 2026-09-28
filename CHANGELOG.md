@@ -6,6 +6,28 @@ The [README](README.md) calls the checks "a list of scars". This file is the
 same idea for behaviour: each entry tries to leave you with something you can
 use on your own board, not just a version number.
 
+## 2026-09-29
+
+### Fixed — a quick tap after stopping a recording showed "!"
+
+**What you saw.** Stop a recording, tap through OK, tap REC again straight
+away — and instead of a new recording you get the red "!" screen. Wait a
+moment and try again, and it works.
+
+**Why.** The screen moves to OK the instant you press stop, but the mic task
+is still finishing: it writes the last page, updates the directory and hands
+the I2S channel back. `port_rec_start()` refused to start while the old task
+was still running, and a fast tap landed inside that window.
+
+**Fix.** If the running recording has been told to stop, `port_rec_start()`
+now waits for it (up to one second) before starting the next one. The
+finishing path never takes the LVGL lock, so waiting from the UI cannot
+deadlock.
+
+**Check.** `tools/sim-rec-again-check.py` records three times in a row, at a
+normal pace and with taps 60 ms apart. The simulator stops instantly, so it
+cannot reproduce this particular race — the check guards the flow around it.
+
 ## 2026-09-21
 
 ### Fixed — the stopwatch started when you swiped away from it
